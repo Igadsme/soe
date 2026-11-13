@@ -7,6 +7,7 @@ class SourceCreate(BaseModel):
     external_id: str = Field(min_length=1, max_length=255)
     title: str = Field(min_length=1, max_length=500)
     url: HttpUrl
+    media_path: str | None = None
 
 
 class RightsCreate(BaseModel):
@@ -15,6 +16,7 @@ class RightsCreate(BaseModel):
     publishing_allowed: bool
     evidence: str = Field(min_length=5)
     expires_at: datetime | None = None
+    allowed_platforms: list[str] = []
 
 
 class Highlight(BaseModel):
