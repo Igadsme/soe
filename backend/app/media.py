@@ -4,6 +4,8 @@ import hashlib
 from pathlib import Path
 import shutil
 import subprocess
+import re
+import json
 from .config import settings
 
 
@@ -19,6 +21,13 @@ class MediaProbe:
     has_audio: bool
 
 
+def detect_scene_boundaries(path: Path, threshold: float = 0.35) -> list[float]:
+    """Detect scene boundaries using FFmpeg's scene score filter."""
+    expression = f"select=gt(scene\\,{threshold}),showinfo"
+    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-vf", expression, "-an", "-f", "null", "-"], capture_output=True, text=True)
+    return [float(match) for match in re.findall(r"pts_time:([0-9]+(?:\\.[0-9]+)?)", result.stderr)]
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -29,19 +38,34 @@ def sha256_file(path: Path) -> str:
 
 def _binary(name: str) -> str:
     value = shutil.which(name)
+    if not value and name == "ffmpeg":
+        try:
+            import imageio_ffmpeg
+            value = imageio_ffmpeg.get_ffmpeg_exe()
+        except ImportError:
+            value = None
     if not value:
         raise MediaProcessingError(f"{name} is required but not installed")
     return value
 
 
 def probe(path: Path) -> MediaProbe:
-    result = subprocess.run([_binary("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], capture_output=True, text=True, check=True)
-    import json
-    body = json.loads(result.stdout)
-    video = next((s for s in body.get("streams", []) if s.get("codec_type") == "video"), None)
-    if not video:
-        raise MediaProcessingError("media has no video stream")
-    return MediaProbe(float(body["format"]["duration"]), int(video["width"]), int(video["height"]), any(s.get("codec_type") == "audio" for s in body.get("streams", [])))
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], capture_output=True, text=True, check=True)
+        body = json.loads(result.stdout)
+        video = next((s for s in body.get("streams", []) if s.get("codec_type") == "video"), None)
+        if not video:
+            raise MediaProcessingError("media has no video stream")
+        return MediaProbe(float(body["format"]["duration"]), int(video["width"]), int(video["height"]), any(s.get("codec_type") == "audio" for s in body.get("streams", [])))
+    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-f", "null", "-"], capture_output=True, text=True)
+    text = result.stderr
+    duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    video_match = re.search(r"Video: .*?(\d{2,5})x(\d{2,5})", text)
+    if not duration_match or not video_match:
+        raise MediaProcessingError(f"could not probe media: {text[-500:]}")
+    hours, minutes, seconds = duration_match.groups()
+    return MediaProbe(int(hours) * 3600 + int(minutes) * 60 + float(seconds), int(video_match.group(1)), int(video_match.group(2)), "Audio:" in text or " audio" in text)
 
 
 def ingest_authorized(source_path: str, destination: Path) -> tuple[Path, str, MediaProbe]:

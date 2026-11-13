@@ -6,9 +6,9 @@ Repository: `Igadsme/soe`
 
 ## A. Executive summary
 
-The original repository was an M0 prototype with a static dashboard, four database models, two tests, and no real provider, media, publishing, or analytics pipeline. This branch extends it with persistent discovery records, official YouTube/Twitch adapter boundaries, explicit fixture mode, fail-closed rights scope checks, Alembic migration scaffolding, a local media/FFmpeg boundary, Faster-Whisper boundary, durable workflow worker, publication/metric/ledger schemas, structured JSON logging, an API-backed discovery dashboard, and Compose health/worker configuration.
+The original repository was an M0 prototype with a static dashboard, four database models, two tests, and no real provider, media, publishing, or analytics pipeline. This branch extends it with persistent discovery records, official YouTube/Twitch adapter boundaries, explicit fixture mode, fail-closed rights scope checks, Alembic migration scaffolding, bundled FFmpeg, Faster-Whisper transcription, durable workflow worker, publication/metric/ledger schemas, structured JSON logging, an API-backed discovery dashboard, and Compose health/worker configuration.
 
-The application is not production-ready. No YouTube or Twitch credentials, OAuth publishing accounts, authorized video files, FFmpeg binary, Faster-Whisper model, cloud environment, backup target, or platform approvals were available. Those blockers are reported as blocked rather than represented as successful production verification.
+The local media path is now verified against three original, locally generated test videos using bundled FFmpeg and Faster-Whisper `tiny.en`. The application is still not production-ready: no YouTube or Twitch credentials, OAuth publishing accounts, cloud environment, backup target, or platform approvals were available.
 
 ## B. Milestone completion matrix
 
@@ -17,14 +17,14 @@ The application is not production-ready. No YouTube or Twitch credentials, OAuth
 | M0 Foundation | PARTIAL | FastAPI smoke test, 6 backend tests, Next build, Alembic fresh-db migration | Auth, Redis wiring, production ingress, Docker daemon verification, full CI run |
 | M1 Discovery | PARTIAL | Live adapter code; fixture discovery persisted 3 records through API | Live API credentials and scheduled channel/trending jobs |
 | M2 Rights/media | PARTIAL | Rights expiry/revocation/platform tests; authorized local ingestion boundary | Real authorized media test and object storage lifecycle |
-| M3 Video intelligence | BLOCKED | Faster-Whisper capability boundary and media probe code | FFmpeg/model binaries, real transcription, scenes, audio/visual events |
+| M3 Video intelligence | PARTIAL | Bundled FFmpeg + Faster-Whisper tiny.en; 3 real transcriptions and media probes verified | Scene/audio/visual event enrichment beyond transcript; larger-model accuracy evaluation |
 | M4 Highlights | PARTIAL | Evidence-backed transcript candidate extraction and deterministic ranking test | Real transcripts, evaluation dataset, learned quality evaluation |
-| M5 Editing | BLOCKED | FFmpeg renderer validates duration, vertical framing, audio normalization | FFmpeg unavailable on host; no real render artifact verified |
+| M5 Editing | PARTIAL | 3-source E2E produced playable 1080x1920 MP4s with SRT subtitles and normalized audio | Tracking, gaming layouts, transitions, visual QA across broader media |
 | M6 Dashboard | PARTIAL | API-backed overview/discovery pages, loading/error/empty states, responsive CSS | Remaining pages are service-boundary placeholders; authentication absent |
 | M7 Publishing | BLOCKED | Publication schema and rights-gated queue endpoint; publishing disabled by default | OAuth, platform approvals, official upload clients, live account tests |
 | M8 Analytics/revenue | PARTIAL | Verified/unverified metric and ledger schemas/API aggregation | Platform metric imports and actual revenue sources |
 | M9 Optimization | PARTIAL | Transparent ranking primitive and evidence fields | Outcome dataset, experiments, model evaluation loop |
-| M10 Operations | PARTIAL | Worker loop, persistent workflow state, Compose healthcheck, structured logs | Docker daemon/cloud, alerts, backups, restart/recovery drills |
+| M10 Operations | PARTIAL | Worker loop, persistent workflow state, Compose healthcheck, structured logs, Dockerfile FFmpeg install | Docker daemon/cloud, alerts, backups, restart/recovery drills |
 
 ## C. Test results
 
@@ -32,13 +32,15 @@ Commands executed:
 
 ```text
 PYTHONPATH=backend .venv2/bin/pytest -q
-6 passed, 0 failed, 48 warnings
+7 default tests passed, 0 failed, 1 skipped (the opt-in media E2E); opt-in media E2E passed 1/1, 48 warnings
 npm run build --prefix frontend
 successfully compiled and prerendered
 SOE_DATABASE_URL=sqlite:///./migration_test2.db PYTHONPATH=backend .venv2/bin/alembic upgrade head
 successfully applied 0001_initial
 docker compose config --quiet
 valid configuration
+SOE_RUN_MEDIA_E2E=1 PYTHONPATH=backend .venv2/bin/pytest -q backend/tests/test_media_e2e.py
+1 passed in 15.52s; 3 source videos, real Faster-Whisper transcription, rendered clips
 curl /health; POST /api/v1/discovery/search; GET /api/v1/overview
 all returned successful responses
 ```
@@ -49,16 +51,22 @@ The warnings are dependency deprecations from Python 3.14/Starlette and pytest-a
 
 1. Discovery: `backend/app/integrations.py`; official HTTP adapter boundaries plus explicit fixture provider; fixture/API test passed; live credentials unavailable.
 2. Rights and compliance: `backend/app/rights.py`; expiry, revocation, commercial-use, publishing, and platform-scope checks; tests passed.
-3. Video perception: `backend/app/media.py`, `backend/app/transcription.py`; probe and Faster-Whisper boundary implemented; real model execution blocked.
+3. Video perception: `backend/app/media.py`, `backend/app/transcription.py`; bundled FFmpeg decode and Faster-Whisper tiny.en executed on 3 original videos; broader event analysis remains.
 4. Highlight detection: `backend/app/pipeline.py`; timestamped evidence-backed transcript candidate extraction; tests passed.
 5. Viral ranking: `backend/app/ranking.py`; transparent weighted score; no virality guarantee and no learned model yet.
-6. Editing: `backend/app/media.py`; FFmpeg vertical renderer and validation; binary unavailable, so no render claim.
+6. Editing: `backend/app/media.py`; FFmpeg vertical renderer and validation; real 1080x1920 captioned MP4 artifacts verified.
 7. Publishing: `backend/app/main.py` publication queue plus rights gate; disabled by default; no OAuth client or live upload claim.
 8. Analytics/optimization: `MetricEvent`, `LedgerEntry`, overview/analytics endpoints; no provider import or observed production outcome dataset.
 
 ## E. End-to-end demonstration
 
-The verified local path was: fixture discovery → persisted source records → overview aggregation. It did not proceed to media ingestion, transcription, rendering, approval, publishing, or platform analytics because no authorized media, FFmpeg/model runtime, or platform credentials were available. No simulated completion is reported as a real end-to-end success.
+The verified local path was: original local media generation → authorized local ingestion and SHA-256 → FFmpeg probe → Faster-Whisper tiny.en transcription → timestamped evidence candidate ranking → SRT generation → FFmpeg vertical render → output probe. Three source artifacts were processed:
+
+- `/Users/gadimani/Documents/Codex/2026-11-13/files-pasted-by-the-user-build/outputs/e2e/authorized_test_source.mp4`
+- `/Users/gadimani/Documents/Codex/2026-11-13/files-pasted-by-the-user-build/outputs/e2e/authorized_test_source_long.mp4`
+- `/Users/gadimani/Documents/Codex/2026-11-13/files-pasted-by-the-user-build/outputs/e2e/authorized_test_source_pattern.mp4`
+
+Generated captioned clip artifacts are under `/Users/gadimani/Documents/Codex/2026-11-13/files-pasted-by-the-user-build/outputs/e2e/*_clip_*.mp4` and were verified as playable 1080x1920 files with audio. Publishing and platform analytics were not attempted.
 
 ## F. Deployment status
 
@@ -74,9 +82,9 @@ Implemented: fail-closed rights policy, explicit allowed-platform scope, upload 
 
 ## I. Remaining work
 
-Code: complete authenticated settings/account workflows, scheduled discovery, retries/backoff, real scene/audio/visual analysis, subtitle generation, rendering QA, OAuth clients, provider analytics, backup/alert integrations, and browser E2E tests.
+Code: complete authenticated settings/account workflows, scheduled discovery, retries/backoff, richer scene/audio/visual analysis, tracking/layout presets, OAuth clients, provider analytics, backup/alert integrations, and browser E2E tests.
 
-External: YouTube/Twitch keys, creator-owned or licensed test videos, FFmpeg/model runtime, platform OAuth apps and approvals, cloud account/target, object storage, DNS/HTTPS, and monetization eligibility.
+External: YouTube/Twitch keys, platform OAuth apps and approvals, cloud account/target, object storage, DNS/HTTPS, and monetization eligibility.
 
 ## J. Final verdict
 

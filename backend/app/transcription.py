@@ -1,6 +1,9 @@
 """Optional Faster-Whisper boundary. Installation is intentionally optional for the CPU-only base image."""
 from pathlib import Path
+import subprocess
+import numpy as np
 from .pipeline import TranscriptSegment
+from .media import _binary
 
 
 class TranscriptionUnavailable(RuntimeError):
@@ -16,5 +19,8 @@ class FasterWhisperTranscriber:
         self.model = WhisperModel(model_size, device="auto", compute_type="int8")
 
     def transcribe(self, media_path: Path) -> list[TranscriptSegment]:
-        segments, _ = self.model.transcribe(str(media_path), word_timestamps=True)
+        # Passing a waveform avoids PyAV metadata_errors incompatibilities across wheels.
+        raw = subprocess.run([_binary("ffmpeg"), "-v", "error", "-i", str(media_path), "-f", "s16le", "-ac", "1", "-ar", "16000", "-"], capture_output=True, check=True).stdout
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        segments, _ = self.model.transcribe(audio, word_timestamps=True)
         return [TranscriptSegment(float(item.start), float(item.end), item.text.strip()) for item in segments if item.text.strip()]
