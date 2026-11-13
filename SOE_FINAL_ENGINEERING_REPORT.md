@@ -20,7 +20,7 @@ The local media path is now verified against three original, locally generated t
 | M3 Video intelligence | PARTIAL | Bundled FFmpeg + Faster-Whisper tiny.en; 3 real transcriptions and media probes verified | Scene/audio/visual event enrichment beyond transcript; larger-model accuracy evaluation |
 | M4 Highlights | PARTIAL | Evidence-backed transcript candidate extraction and deterministic ranking test | Real transcripts, evaluation dataset, learned quality evaluation |
 | M5 Editing | PARTIAL | 3-source E2E produced playable 1080x1920 MP4s with SRT subtitles and normalized audio | Tracking, gaming layouts, transitions, visual QA across broader media |
-| M6 Dashboard | PARTIAL | API-backed overview/discovery pages, loading/error/empty states, responsive CSS | Remaining pages are service-boundary placeholders; authentication absent |
+| M6 Dashboard | PARTIAL | API-backed overview/discovery/AI Studio plus publishing/analytics/revenue/agents/settings data panels | Browser E2E, richer per-page controls, pagination, account-connection UI |
 | M7 Publishing | BLOCKED | Publication schema and rights-gated queue endpoint; publishing disabled by default | OAuth, platform approvals, official upload clients, live account tests |
 | M8 Analytics/revenue | PARTIAL | Verified/unverified metric and ledger schemas/API aggregation | Platform metric imports and actual revenue sources |
 | M9 Optimization | PARTIAL | Transparent ranking primitive and evidence fields | Outcome dataset, experiments, model evaluation loop |
@@ -31,14 +31,14 @@ The local media path is now verified against three original, locally generated t
 | Milestone | Status | Evidence | Outstanding |
 |---|---|---|---|
 | M11 Web application | PARTIAL | API-backed Overview, Discovery, and AI Studio upload/process/download workflow; frontend build passes | Full remaining pages, browser Playwright suite, richer progress events |
-| M12 Authentication/security | PARTIAL | Signed HttpOnly session primitive, upload limits/type validation, tamper test, rights gate | Production credentials, CSRF strategy, rate limiting, encrypted OAuth storage, full protected-route coverage |
+| M12 Authentication/security | PARTIAL | PBKDF2 password-hash support, signed expiring HttpOnly sessions, production route protection, CORS, security headers, rate limiter, tamper/unauthorized tests | CSRF token workflow, encrypted OAuth storage, full adversarial upload/media tests |
 | M13 YouTube/Twitch discovery | PARTIAL | Official HTTP adapters and fixture/API persistence test | Live keys, channel schedules, Twitch event subscriptions, live verification |
 | M14 YouTube publishing | BLOCKED | Rights-gated publication queue and official upload boundary | OAuth account, token persistence/refresh, private test upload |
 | M15 AI intelligence | PARTIAL | Real Faster-Whisper transcription, evidence ranking, FFmpeg scene helper, subtitle/render checks | Visual/audio event models, tracking, multimodal context, evaluation dataset |
 | M16 Autonomous workflows | PARTIAL | Persistent workflow records, worker loop, retry/backoff/daily-limit primitives | Scheduled discovery, cancellation, dead-letter queue, recovery drill |
 | M17 Cloud deployment | PARTIAL | Compose PostgreSQL/Redis/API/frontend/worker config, healthcheck, Docker FFmpeg install | Docker daemon unavailable locally; HTTPS, backups, object storage, cloud verification |
 | M18 E2E verification | PARTIAL | Real-media E2E and live HTTP upload/process/download verified | Publishing, cloud, restart/recovery, live discovery tests |
-| M19 QA | PARTIAL | 8 default backend tests, opt-in real-media test, frontend production build, migration test | Browser E2E, security scan, Docker integration, platform tests |
+| M19 QA | PARTIAL | 10 default backend tests, opt-in real-media test, frontend production build, migration test, unauthorized-route test | Browser E2E, security scan, Docker integration, platform tests |
 | M20 Engineering report | PASS | This report updated with evidence, artifacts, commits, blockers, and verdict | None for report deliverable |
 
 ## C. Test results
@@ -47,7 +47,7 @@ Commands executed:
 
 ```text
 PYTHONPATH=backend .venv2/bin/pytest -q
-9 default tests passed, 0 failed, 1 skipped (the opt-in media E2E); opt-in media E2E passed 1/1, 65 warnings
+10 default tests passed, 0 failed, 1 skipped (the opt-in media E2E); opt-in media E2E passed 1/1, 79 warnings
 npm run build --prefix frontend
 successfully compiled and prerendered
 SOE_DATABASE_URL=sqlite:///./migration_test2.db PYTHONPATH=backend .venv2/bin/alembic upgrade head

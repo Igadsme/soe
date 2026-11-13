@@ -15,8 +15,11 @@ class Settings(BaseSettings):
     whisper_model_size: str = "tiny.en"
     admin_username: str = "operator"
     admin_password: str = ""
+    admin_password_hash: str = ""
     session_secret: str = ""
     session_ttl_seconds: int = 28800
+    cors_origins: str = "http://localhost:3000"
+    rate_limit_per_minute: int = 120
     model_config = SettingsConfigDict(env_prefix="SOE_", env_file=".env", extra="ignore")
 
 

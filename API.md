@@ -15,3 +15,4 @@
 - `POST /api/v1/sources/upload` — validated local video upload, initially stored as `rights_review`.
 - `POST /api/v1/sources/{id}/process` — rights-gated real Faster-Whisper + FFmpeg processing and clip persistence.
 - `GET /api/v1/clips/{id}/download` — authenticated rendered MP4 download.
+- `GET /api/v1/revenue`, `GET /api/v1/agents`, `GET /api/v1/settings` — verified ledger entries, agent capability status, and safe non-secret runtime configuration.

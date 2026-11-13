@@ -1,13 +1,16 @@
 from contextlib import asynccontextmanager
 import hmac
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 from uuid import uuid4
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .db import Base, engine, session
-from .auth import make_session, require_auth
+from .auth import make_session, require_auth, verify_password
 from .config import settings
 from .integrations import FixtureProvider, ProviderUnavailable, TwitchHelixProvider, YouTubeDataProvider
 from .logging_config import configure_logging
@@ -26,6 +29,26 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=True, allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token"])
+
+_rate_windows: dict[str, deque[float]] = defaultdict(deque)
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    now = time.monotonic()
+    window = _rate_windows[request.client.host if request.client else "unknown"]
+    while window and now - window[0] > 60:
+        window.popleft()
+    if len(window) >= settings.rate_limit_per_minute:
+        return JSONResponse({"detail": "rate limit exceeded"}, status_code=429, headers={"Retry-After": "60"})
+    window.append(now)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
+    return response
 
 
 
@@ -36,11 +59,12 @@ async def health() -> dict:
 
 @app.post("/api/v1/auth/login")
 async def login(username: str = Form(...), password: str = Form(...)) -> JSONResponse:
-    if not settings.admin_password:
+    if not settings.admin_password_hash and not settings.admin_password:
         if settings.demo_mode and settings.env == "development":
             return JSONResponse({"authenticated": True, "mode": "development-bypass"})
         raise HTTPException(503, "authentication is not configured")
-    if not hmac.compare_digest(username, settings.admin_username) or not hmac.compare_digest(password, settings.admin_password):
+    password_ok = verify_password(password, settings.admin_password_hash) if settings.admin_password_hash else settings.env == "development" and hmac.compare_digest(password, settings.admin_password)
+    if not hmac.compare_digest(username, settings.admin_username) or not password_ok:
         raise HTTPException(401, "invalid credentials")
     response = JSONResponse({"authenticated": True, "username": username})
     response.set_cookie("soe_session", make_session(username), httponly=True, secure=settings.env == "production", samesite="lax", max_age=settings.session_ttl_seconds)
@@ -55,7 +79,7 @@ async def logout() -> JSONResponse:
 
 
 @app.get("/api/v1/overview")
-async def overview(db: Session = Depends(session)) -> dict:
+async def overview(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     counts = {}
     for label, model in (("sources", Source), ("clips", Clip), ("workflows", WorkflowRun)):
         counts[label] = db.scalar(select(func.count()).select_from(model)) or 0
@@ -86,7 +110,7 @@ async def upload_source(file: UploadFile = File(...), title: str = Form(...), db
 
 
 @app.post("/api/v1/sources", response_model=SourceRead, status_code=201)
-async def create_source(payload: SourceCreate, db: Session = Depends(session)) -> Source:
+async def create_source(payload: SourceCreate, db: Session = Depends(session), _: str = Depends(require_auth)) -> Source:
     source = Source(platform=payload.platform, external_id=payload.external_id, title=payload.title, url=str(payload.url), media_path=payload.media_path)
     db.add(source)
     db.commit()
@@ -95,12 +119,12 @@ async def create_source(payload: SourceCreate, db: Session = Depends(session)) -
 
 
 @app.get("/api/v1/sources", response_model=list[SourceRead])
-async def list_sources(db: Session = Depends(session)) -> list[Source]:
+async def list_sources(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[Source]:
     return list(db.scalars(select(Source).order_by(Source.created_at.desc())).all())
 
 
 @app.post("/api/v1/sources/{source_id}/rights", status_code=201)
-async def create_rights(source_id: int, payload: RightsCreate, db: Session = Depends(session)) -> dict:
+async def create_rights(source_id: int, payload: RightsCreate, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(404, "source not found")
@@ -155,7 +179,7 @@ async def process_source(source_id: int, db: Session = Depends(session), _: str 
 
 
 @app.get("/api/v1/clips", response_model=list[ClipRead])
-async def list_clips(db: Session = Depends(session)) -> list[Clip]:
+async def list_clips(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[Clip]:
     return list(db.scalars(select(Clip).order_by(Clip.score.desc())).all())
 
 
@@ -168,7 +192,7 @@ async def download_clip(clip_id: int, db: Session = Depends(session), _: str = D
 
 
 @app.post("/api/v1/discovery/search")
-async def discover(platform: str, query: str, db: Session = Depends(session)) -> dict:
+async def discover(platform: str, query: str, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     if platform not in {"youtube", "twitch"}:
         raise HTTPException(422, "platform must be youtube or twitch")
     provider = (FixtureProvider(platform) if settings.demo_mode else YouTubeDataProvider() if platform == "youtube" else TwitchHelixProvider())
@@ -187,13 +211,13 @@ async def discover(platform: str, query: str, db: Session = Depends(session)) ->
 
 
 @app.get("/api/v1/publications")
-async def publications(db: Session = Depends(session)) -> list[dict]:
+async def publications(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
     rows = list(db.scalars(select(Publication).order_by(Publication.created_at.desc())).all())
     return [{"id": row.id, "clip_id": row.clip_id, "platform": row.platform, "status": row.status, "external_id": row.external_id, "error": row.error} for row in rows]
 
 
 @app.post("/api/v1/clips/{clip_id}/publish")
-async def queue_publication(clip_id: int, platform: str, db: Session = Depends(session)) -> dict:
+async def queue_publication(clip_id: int, platform: str, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     if not settings.publishing_enabled:
         raise HTTPException(409, "publishing is disabled by SOE_PUBLISHING_ENABLED")
     clip = db.get(Clip, clip_id)
@@ -209,13 +233,40 @@ async def queue_publication(clip_id: int, platform: str, db: Session = Depends(s
 
 
 @app.get("/api/v1/analytics")
-async def analytics(db: Session = Depends(session)) -> dict:
+async def analytics(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     events = list(db.scalars(select(MetricEvent)).all())
     return {"verified": [{"metric": event.metric, "value": event.value, "publication_id": event.publication_id} for event in events if event.verified], "unverified": [{"metric": event.metric, "value": event.value, "publication_id": event.publication_id} for event in events if not event.verified]}
 
 
+@app.get("/api/v1/revenue")
+async def revenue(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    entries = list(db.scalars(select(LedgerEntry).order_by(LedgerEntry.created_at.desc())).all())
+    return {"entries": [{"id": item.id, "kind": item.kind, "category": item.category, "cents": item.cents, "verified": item.verified, "note": item.note} for item in entries], "verified_only": True}
+
+
+@app.get("/api/v1/agents")
+async def agents(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
+    queued = db.scalar(select(func.count()).select_from(WorkflowRun).where(WorkflowRun.state == "queued")) or 0
+    live_discovery = bool(settings.youtube_api_key or (settings.twitch_client_id and settings.twitch_client_secret))
+    return [{"name": name, "status": ("ready" if ready else "blocked"), "detail": detail, "queued_workflows": queued} for name, ready, detail in [
+        ("discovery", live_discovery or settings.demo_mode, "official adapters configured" if live_discovery else "fixture mode only"),
+        ("rights", True, "fail-closed policy active"),
+        ("perception", True, f"Faster-Whisper {settings.whisper_model_size} boundary available"),
+        ("highlights", True, "evidence-backed ranking active"),
+        ("editing", True, "FFmpeg renderer available"),
+        ("publishing", settings.publishing_enabled, "publishing feature flag"),
+        ("analytics", True, "verified/unverified ledger active"),
+        ("optimization", False, "requires observed performance dataset"),
+    ]]
+
+
+@app.get("/api/v1/settings")
+async def read_settings(_: str = Depends(require_auth)) -> dict:
+    return {"environment": settings.env, "demo_mode": settings.demo_mode, "whisper_model_size": settings.whisper_model_size, "publishing_enabled": settings.publishing_enabled, "max_upload_bytes": settings.max_upload_bytes, "max_clip_seconds": settings.max_clip_seconds, "configured_integrations": {"youtube": bool(settings.youtube_api_key), "twitch": bool(settings.twitch_client_id and settings.twitch_client_secret)}}
+
+
 @app.post("/api/v1/demo/pipeline")
-async def demo_pipeline(db: Session = Depends(session)) -> dict:
+async def demo_pipeline(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     """Creates auditable local records only; no download, inference, or publishing is faked."""
     source = Source(platform="youtube", external_id="demo-authorized-source", title="Authorized demo source", url="https://example.com/authorized-source", status="authorized")
     db.add(source)

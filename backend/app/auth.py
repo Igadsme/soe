@@ -1,6 +1,7 @@
 import base64
 from hashlib import pbkdf2_hmac
 import hmac
+import secrets
 import time
 from fastapi import HTTPException, Request
 from .config import settings
@@ -37,6 +38,20 @@ def verify_session(value: str | None) -> str:
 
 def hash_password(password: str, salt: bytes) -> str:
     return pbkdf2_hmac("sha256", password.encode(), salt, 200_000).hex()
+
+
+def make_password_hash(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    return f"{salt.hex()}${hash_password(password, salt)}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt_hex, digest = stored.split("$", 1)
+        salt = bytes.fromhex(salt_hex)
+        return hmac.compare_digest(hash_password(password, salt), digest)
+    except (ValueError, TypeError):
+        return False
 
 
 def require_auth(request: Request) -> str:
