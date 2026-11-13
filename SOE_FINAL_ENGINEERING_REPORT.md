@@ -8,7 +8,7 @@ Repository: `Igadsme/soe`
 
 The original repository was an M0 prototype with a static dashboard, four database models, two tests, and no real provider, media, publishing, or analytics pipeline. This branch extends it with persistent discovery records, official YouTube/Twitch adapter boundaries, explicit fixture mode, fail-closed rights scope checks, Alembic migration scaffolding, bundled FFmpeg, Faster-Whisper transcription, durable workflow worker, publication/metric/ledger schemas, structured JSON logging, an API-backed discovery dashboard, and Compose health/worker configuration.
 
-The local media path is now verified against three original, locally generated test videos using bundled FFmpeg and Faster-Whisper `tiny.en`. The application is still not production-ready: no YouTube or Twitch credentials, OAuth publishing accounts, cloud environment, backup target, or platform approvals were available.
+The local media path is now verified against three original, locally generated test videos using bundled FFmpeg and Faster-Whisper `tiny.en`. The browser-operable/API vertical slice is also verified: upload → rights approval → processing → 3 persisted rendered clips → HTTP MP4 download. The application is still not production-ready: no YouTube or Twitch credentials, OAuth publishing accounts, cloud environment, backup target, or platform approvals were available.
 
 ## B. Milestone completion matrix
 
@@ -26,13 +26,28 @@ The local media path is now verified against three original, locally generated t
 | M9 Optimization | PARTIAL | Transparent ranking primitive and evidence fields | Outcome dataset, experiments, model evaluation loop |
 | M10 Operations | PARTIAL | Worker loop, persistent workflow state, Compose healthcheck, structured logs, Dockerfile FFmpeg install | Docker daemon/cloud, alerts, backups, restart/recovery drills |
 
+### Phase 3 milestones
+
+| Milestone | Status | Evidence | Outstanding |
+|---|---|---|---|
+| M11 Web application | PARTIAL | API-backed Overview, Discovery, and AI Studio upload/process/download workflow; frontend build passes | Full remaining pages, browser Playwright suite, richer progress events |
+| M12 Authentication/security | PARTIAL | Signed HttpOnly session primitive, upload limits/type validation, tamper test, rights gate | Production credentials, CSRF strategy, rate limiting, encrypted OAuth storage, full protected-route coverage |
+| M13 YouTube/Twitch discovery | PARTIAL | Official HTTP adapters and fixture/API persistence test | Live keys, channel schedules, Twitch event subscriptions, live verification |
+| M14 YouTube publishing | BLOCKED | Rights-gated publication queue and official upload boundary | OAuth account, token persistence/refresh, private test upload |
+| M15 AI intelligence | PARTIAL | Real Faster-Whisper transcription, evidence ranking, FFmpeg scene helper, subtitle/render checks | Visual/audio event models, tracking, multimodal context, evaluation dataset |
+| M16 Autonomous workflows | PARTIAL | Persistent workflow records, worker loop, retry/backoff/daily-limit primitives | Scheduled discovery, cancellation, dead-letter queue, recovery drill |
+| M17 Cloud deployment | PARTIAL | Compose PostgreSQL/Redis/API/frontend/worker config, healthcheck, Docker FFmpeg install | Docker daemon unavailable locally; HTTPS, backups, object storage, cloud verification |
+| M18 E2E verification | PARTIAL | Real-media E2E and live HTTP upload/process/download verified | Publishing, cloud, restart/recovery, live discovery tests |
+| M19 QA | PARTIAL | 8 default backend tests, opt-in real-media test, frontend production build, migration test | Browser E2E, security scan, Docker integration, platform tests |
+| M20 Engineering report | PASS | This report updated with evidence, artifacts, commits, blockers, and verdict | None for report deliverable |
+
 ## C. Test results
 
 Commands executed:
 
 ```text
 PYTHONPATH=backend .venv2/bin/pytest -q
-7 default tests passed, 0 failed, 1 skipped (the opt-in media E2E); opt-in media E2E passed 1/1, 48 warnings
+9 default tests passed, 0 failed, 1 skipped (the opt-in media E2E); opt-in media E2E passed 1/1, 65 warnings
 npm run build --prefix frontend
 successfully compiled and prerendered
 SOE_DATABASE_URL=sqlite:///./migration_test2.db PYTHONPATH=backend .venv2/bin/alembic upgrade head
@@ -41,6 +56,8 @@ docker compose config --quiet
 valid configuration
 SOE_RUN_MEDIA_E2E=1 PYTHONPATH=backend .venv2/bin/pytest -q backend/tests/test_media_e2e.py
 1 passed in 15.52s; 3 source videos, real Faster-Whisper transcription, rendered clips
+Live API workflow on `127.0.0.1:8020`
+upload 200 → rights approval 201 → process 200 with 3 clips → download 200, `video/mp4`, 1080x1920 probe
 curl /health; POST /api/v1/discovery/search; GET /api/v1/overview
 all returned successful responses
 ```
@@ -68,6 +85,8 @@ The verified local path was: original local media generation → authorized loca
 
 Generated captioned clip artifacts are under `/Users/gadimani/Documents/Codex/2026-11-13/files-pasted-by-the-user-build/outputs/e2e/*_clip_*.mp4` and were verified as playable 1080x1920 files with audio. Publishing and platform analytics were not attempted.
 
+The API vertical-slice artifacts were written under `/Users/gadimani/Documents/Codex/2026-11-13/files-pasted-by-the-user-build/outputs/api-media/clips/` during the live smoke test.
+
 ## F. Deployment status
 
 Compose defines PostgreSQL, Redis, API, worker, and frontend services. The API has a healthcheck and the worker runs the durable polling boundary. Deployment is not verified because the local Docker daemon was unavailable. Cloud deployment additionally requires HTTPS ingress, managed/encrypted PostgreSQL backups, object storage, secret management, OAuth callbacks, and monitoring.
@@ -82,7 +101,7 @@ Implemented: fail-closed rights policy, explicit allowed-platform scope, upload 
 
 ## I. Remaining work
 
-Code: complete authenticated settings/account workflows, scheduled discovery, retries/backoff, richer scene/audio/visual analysis, tracking/layout presets, OAuth clients, provider analytics, backup/alert integrations, and browser E2E tests.
+Code: complete production authentication configuration, scheduled discovery, retries/backoff orchestration, richer scene/audio/visual analysis, tracking/layout presets, OAuth clients, provider analytics, backup/alert integrations, and browser E2E tests.
 
 External: YouTube/Twitch keys, platform OAuth apps and approvals, cloud account/target, object storage, DNS/HTTPS, and monetization eligibility.
 

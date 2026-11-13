@@ -47,6 +47,8 @@ class Clip(Base):
     score: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(32), default="candidate")
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    output_path: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    subtitle_path: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

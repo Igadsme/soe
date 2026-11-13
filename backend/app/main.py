@@ -1,14 +1,22 @@
 from contextlib import asynccontextmanager
-from fastapi import Depends, FastAPI, HTTPException
+import hmac
+from pathlib import Path
+from uuid import uuid4
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .db import Base, engine, session
+from .auth import make_session, require_auth
 from .config import settings
 from .integrations import FixtureProvider, ProviderUnavailable, TwitchHelixProvider, YouTubeDataProvider
 from .logging_config import configure_logging
+from .media import ingest_authorized, render_vertical
 from .models import Clip, LedgerEntry, MetricEvent, Publication, RightsRecord, Source, WorkflowRun
+from .pipeline import extract_candidates
 from .rights import can_ingest_and_publish, can_publish_to
 from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead
+from .transcription import FasterWhisperTranscriber, TranscriptionUnavailable
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -26,6 +34,26 @@ async def health() -> dict:
     return {"status": "ok", "service": "soe-api"}
 
 
+@app.post("/api/v1/auth/login")
+async def login(username: str = Form(...), password: str = Form(...)) -> JSONResponse:
+    if not settings.admin_password:
+        if settings.demo_mode and settings.env == "development":
+            return JSONResponse({"authenticated": True, "mode": "development-bypass"})
+        raise HTTPException(503, "authentication is not configured")
+    if not hmac.compare_digest(username, settings.admin_username) or not hmac.compare_digest(password, settings.admin_password):
+        raise HTTPException(401, "invalid credentials")
+    response = JSONResponse({"authenticated": True, "username": username})
+    response.set_cookie("soe_session", make_session(username), httponly=True, secure=settings.env == "production", samesite="lax", max_age=settings.session_ttl_seconds)
+    return response
+
+
+@app.post("/api/v1/auth/logout")
+async def logout() -> JSONResponse:
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie("soe_session")
+    return response
+
+
 @app.get("/api/v1/overview")
 async def overview(db: Session = Depends(session)) -> dict:
     counts = {}
@@ -34,6 +62,27 @@ async def overview(db: Session = Depends(session)) -> dict:
     revenue = db.scalar(select(func.coalesce(func.sum(LedgerEntry.cents), 0)).where(LedgerEntry.kind == "revenue", LedgerEntry.verified.is_(True))) or 0
     expenses = db.scalar(select(func.coalesce(func.sum(LedgerEntry.cents), 0)).where(LedgerEntry.kind == "expense", LedgerEntry.verified.is_(True))) or 0
     return {"environment": settings.env, "demo_mode": settings.demo_mode, "counts": counts, "revenue_cents": revenue, "expense_cents": expenses}
+
+
+@app.post("/api/v1/sources/upload")
+async def upload_source(file: UploadFile = File(...), title: str = Form(...), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    if file.content_type not in {"video/mp4", "video/quicktime", "video/webm", "application/octet-stream"}:
+        raise HTTPException(415, "only MP4, QuickTime, or WebM uploads are accepted")
+    media_root = Path(settings.media_root).resolve()
+    media_root.mkdir(parents=True, exist_ok=True)
+    destination = media_root / f"upload-{uuid4().hex}.mp4"
+    size = 0
+    with destination.open("wb") as output:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > settings.max_upload_bytes:
+                destination.unlink(missing_ok=True)
+                raise HTTPException(413, "upload exceeds configured size limit")
+            output.write(chunk)
+    source = Source(platform="upload", external_id=destination.stem, title=title, url="https://local.soe/upload", media_path=str(destination), status="rights_review")
+    db.add(source)
+    db.commit()
+    return {"source_id": source.id, "status": source.status, "bytes": size, "filename": destination.name}
 
 
 @app.post("/api/v1/sources", response_model=SourceRead, status_code=201)
@@ -62,9 +111,60 @@ async def create_rights(source_id: int, payload: RightsCreate, db: Session = Dep
     return {"source_id": source_id, "status": source.status, "can_publish": can_ingest_and_publish(record)}
 
 
+@app.post("/api/v1/sources/{source_id}/process")
+async def process_source(source_id: int, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    source = db.get(Source, source_id)
+    rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == source_id).order_by(RightsRecord.created_at.desc()))
+    if not source or not rights:
+        raise HTTPException(404, "source or rights record not found")
+    if not can_ingest_and_publish(rights):
+        raise HTTPException(403, "rights do not authorize processing")
+    if not source.media_path or not Path(source.media_path).is_file():
+        raise HTTPException(422, "source has no local authorized media path")
+    run = WorkflowRun(source_id=source.id, state="transcribing")
+    db.add(run)
+    db.commit()
+    try:
+        ingested, digest, metadata = ingest_authorized(source.media_path, Path(settings.media_root) / "ingested" / f"{source.id}-{Path(source.media_path).name}")
+        source.media_sha256 = digest
+        segments = FasterWhisperTranscriber(settings.whisper_model_size).transcribe(ingested)
+        candidates = extract_candidates(segments, limit=5)
+        for index, candidate in enumerate(candidates, 1):
+            clip_dir = Path(settings.media_root) / "clips"
+            subtitle = clip_dir / f"source-{source.id}-clip-{index}.srt"
+            output = clip_dir / f"source-{source.id}-clip-{index}.mp4"
+            subtitle.parent.mkdir(parents=True, exist_ok=True)
+            duration = max(1, int(candidate.end - candidate.start))
+            subtitle.write_text(f"1\n00:00:00,000 --> 00:00:{duration:02},000\n{candidate.description}\n", encoding="utf-8")
+            render_vertical(ingested, output, candidate.start, candidate.end, subtitle)
+            db.add(Clip(source_id=source.id, start_seconds=candidate.start, end_seconds=candidate.end, description=candidate.description, hook=candidate.hook, score=candidate.score, status="rendered", evidence=candidate.evidence, output_path=str(output), subtitle_path=str(subtitle)))
+        run.state = "edited"
+        source.status = "analyzed"
+        db.commit()
+        return {"workflow_id": run.id, "source_id": source.id, "state": run.state, "probe": metadata, "transcript_segments": len(segments), "clips_generated": len(candidates)}
+    except TranscriptionUnavailable as exc:
+        run.state = "failed"
+        run.error = str(exc)
+        db.commit()
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:
+        run.state = "failed"
+        run.error = str(exc)
+        db.commit()
+        raise HTTPException(500, "processing failed; inspect workflow error") from exc
+
+
 @app.get("/api/v1/clips", response_model=list[ClipRead])
 async def list_clips(db: Session = Depends(session)) -> list[Clip]:
     return list(db.scalars(select(Clip).order_by(Clip.score.desc())).all())
+
+
+@app.get("/api/v1/clips/{clip_id}/download")
+async def download_clip(clip_id: int, db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
+    clip = db.get(Clip, clip_id)
+    if not clip or not clip.output_path or not Path(clip.output_path).is_file():
+        raise HTTPException(404, "rendered clip not found")
+    return FileResponse(clip.output_path, media_type="video/mp4", filename=Path(clip.output_path).name)
 
 
 @app.post("/api/v1/discovery/search")

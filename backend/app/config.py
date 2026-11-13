@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     twitch_client_secret: str = ""
     publishing_enabled: bool = False
     whisper_model_size: str = "tiny.en"
+    admin_username: str = "operator"
+    admin_password: str = ""
+    session_secret: str = ""
+    session_ttl_seconds: int = 28800
     model_config = SettingsConfigDict(env_prefix="SOE_", env_file=".env", extra="ignore")
 
 

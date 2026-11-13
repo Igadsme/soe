@@ -3,7 +3,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
 class SourceCreate(BaseModel):
-    platform: str = Field(pattern="^(youtube|twitch)$")
+    platform: str = Field(pattern="^(youtube|twitch|upload)$")
     external_id: str = Field(min_length=1, max_length=255)
     title: str = Field(min_length=1, max_length=500)
     url: HttpUrl
@@ -32,6 +32,8 @@ class ClipRead(Highlight):
     id: int
     source_id: int
     status: str
+    output_path: str | None = None
+    subtitle_path: str | None = None
     model_config = ConfigDict(from_attributes=True)
 
 
