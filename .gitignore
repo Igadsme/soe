@@ -8,3 +8,6 @@ node_modules/
 dist/
 *.mp4
 *.wav
+*.aiff
+*.srt
+outputs/e2e/

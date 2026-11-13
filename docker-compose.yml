@@ -15,8 +15,24 @@ services:
     environment:
       SOE_DATABASE_URL: postgresql://soe:soe@db:5432/soe
       SOE_DEMO_MODE: "true"
+      SOE_WHISPER_MODEL_SIZE: tiny.en
     ports: ["8000:8000"]
     depends_on: [db, redis]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  worker:
+    build:
+      context: .
+      dockerfile: infra/api/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment:
+      SOE_DATABASE_URL: postgresql://soe:soe@db:5432/soe
+      SOE_DEMO_MODE: "true"
+      SOE_WHISPER_MODEL_SIZE: tiny.en
+    depends_on: [db, redis, api]
   frontend:
     build:
       context: .

@@ -20,7 +20,7 @@ npm run dev --prefix frontend
 
 The default development database is SQLite. `docker compose up --build` starts PostgreSQL, Redis, the API, and the frontend.
 
-This build deliberately does not claim live platform publishing, revenue, or rights for public URLs. Production integrations require credentials, account approval, and explicit rights records.
+This build deliberately does not claim live platform publishing, revenue, or rights for public URLs. Production integrations require credentials, account approval, and explicit rights records. A real local E2E pipeline is available with `PYTHONPATH=backend .venv2/bin/python scripts/run_e2e.py`; it generates original test media and writes captioned MP4s under `outputs/e2e/`.
 
 ## Current status
 
