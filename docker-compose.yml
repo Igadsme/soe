@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: soe
+      POSTGRES_PASSWORD: soe
+      POSTGRES_DB: soe
+    volumes: [soe-db:/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+  api:
+    build:
+      context: .
+      dockerfile: infra/api/Dockerfile
+    environment:
+      SOE_DATABASE_URL: postgresql://soe:soe@db:5432/soe
+      SOE_DEMO_MODE: "true"
+    ports: ["8000:8000"]
+    depends_on: [db, redis]
+  frontend:
+    build:
+      context: .
+      dockerfile: infra/frontend/Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  soe-db:
