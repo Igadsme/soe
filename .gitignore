@@ -13,3 +13,11 @@ dist/
 outputs/e2e/
 *.egg-info/
 .pytest_cache/
+
+# Local database archives and quality artifacts
+backups/
+*.dump
+coverage.xml
+.coverage
+htmlcov/
+*.tsbuildinfo

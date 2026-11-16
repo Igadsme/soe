@@ -1,0 +1,39 @@
+# Proposed workflow. Owner must copy to .github/workflows with workflow permission.
+name: Production checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: pip install -r backend/requirements.txt
+      - run: pip install -e ".[dev]"
+      - run: ruff check backend/app
+      - run: PYTHONPATH=backend pytest -q backend/tests tests --cov=backend/app --cov-report=xml --cov-report=term-missing
+      - run: pip-audit -r backend/requirements.txt
+      - run: npm ci
+        working-directory: frontend
+      - run: npm audit --omit=dev
+        working-directory: frontend
+      - run: npm run typecheck
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: SOE_DATABASE_URL=sqlite:////tmp/soe-ci-migrations.db alembic upgrade head
+        env:
+          PYTHONPATH: backend
+      - run: cp .env.example .env && docker compose -f docker-compose.prod.yml config --quiet && docker compose -f docker-compose.prod.yml build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml

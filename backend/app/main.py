@@ -1,26 +1,64 @@
-from contextlib import asynccontextmanager
 import hmac
+import logging
+import re
+import secrets
 import time
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from ipaddress import ip_address, ip_network
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
+from fastapi import Path as PathParam
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from .db import Base, engine, session
-from .auth import make_session, require_auth, verify_password
-from .config import settings
-from .integrations import FixtureProvider, ProviderUnavailable, TwitchHelixProvider, YouTubeDataProvider
+
+from .auth import (
+    development_bypass,
+    make_session,
+    require_auth,
+    revoke_session,
+    verify_password,
+)
+from .config import secret_value, settings
+from .db import session
+from .integrations import (
+    FixtureProvider,
+    ProviderUnavailable,
+    TwitchHelixProvider,
+    YouTubeDataProvider,
+)
 from .logging_config import configure_logging
 from .media import ingest_authorized, render_vertical
-from .models import Clip, LedgerEntry, MetricEvent, Publication, RightsRecord, Source, WorkflowRun
+from .models import (
+    Clip,
+    LedgerEntry,
+    MetricEvent,
+    Publication,
+    RightsRecord,
+    Source,
+    WorkflowRun,
+)
 from .pipeline import extract_candidates
 from .rights import can_ingest_and_publish, can_publish_to
-from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead
+from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_media_path
 from .transcription import FasterWhisperTranscriber, TranscriptionUnavailable
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -29,28 +67,81 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=True, allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token"])
+app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID"], expose_headers=["X-Request-ID"])
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
+_login_windows: dict[str, deque[float]] = defaultdict(deque)
+
+
+def client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    try:
+        trusted = any(ip_address(peer) in ip_network(network.strip()) for network in settings.trusted_proxies.split(",") if network.strip())
+        if trusted and request.headers.get("X-Forwarded-For"):
+            return str(ip_address(request.headers["X-Forwarded-For"].split(",")[0].strip()))
+    except ValueError:
+        pass
+    return peer
+
+
+def limited(windows, key: str, limit: int) -> bool:
+    now = time.monotonic()
+    for old in list(windows):
+        if not windows[old] or now - windows[old][-1] >= 60:
+            del windows[old]
+    if key not in windows and len(windows) >= 10000:
+        # Fail closed under key flooding, without unbounded memory growth.
+        return True
+    window = windows[key]
+    while window and now - window[0] >= 60:
+        window.popleft()
+    if len(window) >= limit:
+        return True
+    window.append(now)
+    return False
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, _exc: Exception):
+    request_id = getattr(request.state, "request_id", uuid4().hex)
+    # Provider exception text and tracebacks may include credentials.
+    logging.getLogger("soe.errors").error("unhandled request error", extra={"request_id": request_id})
+    return JSONResponse({"detail": "internal server error", "request_id": request_id}, status_code=500)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_request: Request, exc: RequestValidationError):
+    # Do not echo submitted passwords or other sensitive inputs in validation errors.
+    return JSONResponse({"detail": [{"loc": error["loc"], "type": error["type"], "msg": "invalid input"} for error in exc.errors()]}, status_code=422)
 
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
-    now = time.monotonic()
-    window = _rate_windows[request.client.host if request.client else "unknown"]
-    while window and now - window[0] > 60:
-        window.popleft()
-    if len(window) >= settings.rate_limit_per_minute:
-        return JSONResponse({"detail": "rate limit exceeded"}, status_code=429, headers={"Retry-After": "60"})
-    window.append(now)
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
+    started = time.monotonic()
+    supplied = request.headers.get("X-Request-ID", "")
+    request_id = supplied if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", supplied) else uuid4().hex
+    request.state.request_id = request_id
+    try:
+        if limited(_rate_windows, client_ip(request), settings.rate_limit_per_minute):
+            response = JSONResponse({"detail": "rate limit exceeded"}, status_code=429, headers={"Retry-After": "60"})
+        else:
+            response = await call_next(request)
+    except Exception as exc:
+        response = await unhandled_error(request, exc)
+    response.headers.update({
+        "X-Request-ID": request_id,
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "same-origin",
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        "Cross-Origin-Opener-Policy": "same-origin",
+    })
+    if settings.env == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    logging.getLogger("soe.access").info("request", extra={"request_id": request_id, "method": request.method, "path": request.url.path, "status": response.status_code, "duration_ms": round((time.monotonic() - started) * 1000, 2)})
     return response
-
 
 
 @app.get("/health")
@@ -62,29 +153,47 @@ async def health() -> dict:
 async def ready(db: Session = Depends(session)) -> dict:
     try:
         db.execute(text("SELECT 1"))
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+        heads = set(ScriptDirectory.from_config(Config("alembic.ini")).get_heads())
+        current = set(db.execute(text("SELECT version_num FROM alembic_version")).scalars())
+        if current != heads:
+            raise HTTPException(503, "database migrations are pending")
     except SQLAlchemyError as exc:
         raise HTTPException(503, "database unavailable") from exc
     return {"status": "ready", "service": "soe-api"}
 
 
 @app.post("/api/v1/auth/login")
-async def login(username: str = Form(...), password: str = Form(...)) -> JSONResponse:
+async def login(request: Request, username: str = Form(..., max_length=255), password: str = Form(..., max_length=1024)) -> JSONResponse:
+    key = client_ip(request) + ":" + username.casefold()
+    if limited(_login_windows, key, 5) or limited(_login_windows, "ip:" + client_ip(request), 20):
+        raise HTTPException(429, "login temporarily unavailable", headers={"Retry-After": "60"})
     if not settings.admin_password_hash and not settings.admin_password:
         if settings.demo_mode and settings.env == "development":
             return JSONResponse({"authenticated": True, "mode": "development-bypass"})
         raise HTTPException(503, "authentication is not configured")
-    password_ok = verify_password(password, settings.admin_password_hash) if settings.admin_password_hash else settings.env == "development" and hmac.compare_digest(password, settings.admin_password)
-    if not hmac.compare_digest(username, settings.admin_username) or not password_ok:
+    password_ok = verify_password(password, secret_value(settings.admin_password_hash)) if settings.admin_password_hash else settings.env == "development" and hmac.compare_digest(password.encode(), secret_value(settings.admin_password).encode())
+    if not hmac.compare_digest(username.encode(), settings.admin_username.encode()) or not password_ok:
         raise HTTPException(401, "invalid credentials")
     response = JSONResponse({"authenticated": True, "username": username})
     response.set_cookie("soe_session", make_session(username), httponly=True, secure=settings.env == "production", samesite="lax", max_age=settings.session_ttl_seconds)
+    response.set_cookie("soe_csrf", secrets.token_urlsafe(32), httponly=False, secure=settings.env == "production", samesite="lax", path="/", max_age=settings.session_ttl_seconds)
     return response
 
 
+@app.get("/api/v1/auth/me")
+async def current_user(username: str = Depends(require_auth)) -> dict:
+    return {"username": username}
+
+
 @app.post("/api/v1/auth/logout")
-async def logout() -> JSONResponse:
+async def logout(request: Request, _: str = Depends(require_auth)) -> JSONResponse:
     response = JSONResponse({"authenticated": False})
-    response.delete_cookie("soe_session")
+    if not development_bypass():
+        revoke_session(request.cookies["soe_session"])
+    for name in ("soe_session", "soe_csrf"):
+        response.delete_cookie(name, path="/", secure=settings.env == "production", httponly=name == "soe_session", samesite="lax")
     return response
 
 
@@ -99,12 +208,18 @@ async def overview(db: Session = Depends(session), _: str = Depends(require_auth
 
 
 @app.post("/api/v1/sources/upload")
-async def upload_source(file: UploadFile = File(...), title: str = Form(...), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
-    if file.content_type not in {"video/mp4", "video/quicktime", "video/webm", "application/octet-stream"}:
+async def upload_source(file: UploadFile = File(...), title: str = Form(..., min_length=1, max_length=500), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    if file.content_type not in {"video/mp4", "video/quicktime", "video/webm"}:
         raise HTTPException(415, "only MP4, QuickTime, or WebM uploads are accepted")
     media_root = Path(settings.media_root).resolve()
     media_root.mkdir(parents=True, exist_ok=True)
     destination = media_root / f"upload-{uuid4().hex}.mp4"
+    prefix = await file.read(32)
+    is_mp4 = len(prefix) >= 12 and prefix[4:8] == b"ftyp"
+    is_webm = prefix.startswith(b"\x1a\x45\xdf\xa3")
+    if not ((file.content_type in {"video/mp4", "video/quicktime"} and is_mp4) or (file.content_type == "video/webm" and is_webm)):
+        raise HTTPException(415, "invalid media signature")
+    await file.seek(0)
     size = 0
     with destination.open("wb") as output:
         while chunk := await file.read(1024 * 1024):
@@ -134,7 +249,7 @@ async def list_sources(db: Session = Depends(session), _: str = Depends(require_
 
 
 @app.post("/api/v1/sources/{source_id}/rights", status_code=201)
-async def create_rights(source_id: int, payload: RightsCreate, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+async def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(404, "source not found")
@@ -146,13 +261,18 @@ async def create_rights(source_id: int, payload: RightsCreate, db: Session = Dep
 
 
 @app.post("/api/v1/sources/{source_id}/process")
-async def process_source(source_id: int, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+async def process_source(source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     source = db.get(Source, source_id)
     rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == source_id).order_by(RightsRecord.created_at.desc()))
     if not source or not rights:
         raise HTTPException(404, "source or rights record not found")
     if not can_ingest_and_publish(rights):
         raise HTTPException(403, "rights do not authorize processing")
+    try:
+        if source.media_path:
+            safe_media_path(source.media_path)
+    except ValueError as exc:
+        raise HTTPException(422, "invalid media path") from exc
     if not source.media_path or not Path(source.media_path).is_file():
         raise HTTPException(422, "source has no local authorized media path")
     run = WorkflowRun(source_id=source.id, state="transcribing")
@@ -180,12 +300,12 @@ async def process_source(source_id: int, db: Session = Depends(session), _: str 
         run.state = "failed"
         run.error = str(exc)
         db.commit()
-        raise HTTPException(503, str(exc)) from exc
+        raise HTTPException(503, "service temporarily unavailable") from exc
     except Exception as exc:
         run.state = "failed"
         run.error = str(exc)
         db.commit()
-        raise HTTPException(500, "processing failed; inspect workflow error") from exc
+        raise HTTPException(500, "processing failed") from exc
 
 
 @app.get("/api/v1/clips", response_model=list[ClipRead])
@@ -194,7 +314,7 @@ async def list_clips(db: Session = Depends(session), _: str = Depends(require_au
 
 
 @app.get("/api/v1/clips/{clip_id}/download")
-async def download_clip(clip_id: int, db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
+async def download_clip(clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
     clip = db.get(Clip, clip_id)
     if not clip or not clip.output_path or not Path(clip.output_path).is_file():
         raise HTTPException(404, "rendered clip not found")
@@ -202,14 +322,14 @@ async def download_clip(clip_id: int, db: Session = Depends(session), _: str = D
 
 
 @app.post("/api/v1/discovery/search")
-async def discover(platform: str, query: str, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+async def discover(platform: Literal["youtube", "twitch"], query: str = Query(min_length=1, max_length=200), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     if platform not in {"youtube", "twitch"}:
         raise HTTPException(422, "platform must be youtube or twitch")
     provider = (FixtureProvider(platform) if settings.demo_mode else YouTubeDataProvider() if platform == "youtube" else TwitchHelixProvider())
     try:
         items = await provider.search(query)
     except ProviderUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise HTTPException(503, "service temporarily unavailable") from exc
     created = 0
     for item in items:
         existing = db.scalar(select(Source).where(Source.external_id == item.external_id))
@@ -223,11 +343,11 @@ async def discover(platform: str, query: str, db: Session = Depends(session), _:
 @app.get("/api/v1/publications")
 async def publications(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
     rows = list(db.scalars(select(Publication).order_by(Publication.created_at.desc())).all())
-    return [{"id": row.id, "clip_id": row.clip_id, "platform": row.platform, "status": row.status, "external_id": row.external_id, "error": row.error} for row in rows]
+    return [{"id": row.id, "clip_id": row.clip_id, "platform": row.platform, "status": row.status, "external_id": row.external_id, "error": "publication failed" if row.error else None} for row in rows]
 
 
 @app.post("/api/v1/clips/{clip_id}/publish")
-async def queue_publication(clip_id: int, platform: str, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+async def queue_publication(platform: Literal["youtube", "twitch", "tiktok", "instagram"], clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     if not settings.publishing_enabled:
         raise HTTPException(409, "publishing is disabled by SOE_PUBLISHING_ENABLED")
     clip = db.get(Clip, clip_id)
@@ -278,6 +398,8 @@ async def read_settings(_: str = Depends(require_auth)) -> dict:
 @app.post("/api/v1/demo/pipeline")
 async def demo_pipeline(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     """Creates auditable local records only; no download, inference, or publishing is faked."""
+    if settings.env != "development" or not settings.demo_mode:
+        raise HTTPException(404, "not found")
     source = Source(platform="youtube", external_id="demo-authorized-source", title="Authorized demo source", url="https://example.com/authorized-source", status="authorized")
     db.add(source)
     db.flush()

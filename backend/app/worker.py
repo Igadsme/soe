@@ -2,8 +2,10 @@
 import asyncio
 import logging
 from pathlib import Path
-from .config import settings
+
 from sqlalchemy import select
+
+from .config import settings
 from .db import SessionLocal
 from .models import WorkflowRun
 
@@ -26,9 +28,9 @@ async def run_forever(interval_seconds: int = 10) -> None:
     while True:
         try:
             await process_once()
-            Path("/tmp/soe-worker-heartbeat").touch()
+            Path("/tmp/soe-worker-heartbeat").touch()  # noqa: S108 -- container-local healthcheck contract.
         except Exception:
-            logger.exception("worker_iteration_failed")
+            logger.error("worker_iteration_failed")
         await asyncio.sleep(interval_seconds)
 
 

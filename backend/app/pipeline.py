@@ -1,5 +1,6 @@
 """Evidence-first highlight extraction and persistent workflow orchestration primitives."""
 from dataclasses import dataclass
+
 from .ranking import CandidateSignals, score
 
 
