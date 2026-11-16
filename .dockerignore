@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/.next
+**/media
+**/*.db
+**/*.db-*
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.env
+**/.env.*
+!.env.example
+**/*.log

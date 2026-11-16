@@ -1,12 +1,11 @@
 from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
-from app.db import Base
+from app.db import Base, url
 from app import models
-from app.config import settings
 
 config = context.config
-database_url = settings.database_url.replace("%", "%%")
+database_url = url.replace("%", "%%")
 config.set_main_option("sqlalchemy.url", database_url)
 if config.config_file_name:
     fileConfig(config.config_file_name)

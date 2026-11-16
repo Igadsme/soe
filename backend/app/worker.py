@@ -1,6 +1,8 @@
 """Small durable worker loop. Temporal/Celery can replace this boundary in deployment."""
 import asyncio
 import logging
+from pathlib import Path
+from .config import settings
 from sqlalchemy import select
 from .db import SessionLocal
 from .models import WorkflowRun
@@ -20,9 +22,11 @@ async def process_once() -> int:
 
 
 async def run_forever(interval_seconds: int = 10) -> None:
+    settings.validate_production()
     while True:
         try:
             await process_once()
+            Path("/tmp/soe-worker-heartbeat").touch()
         except Exception:
             logger.exception("worker_iteration_failed")
         await asyncio.sleep(interval_seconds)

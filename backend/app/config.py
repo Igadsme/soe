@@ -20,6 +20,25 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 28800
     cors_origins: str = "http://localhost:3000"
     rate_limit_per_minute: int = 120
+    def validate_production(self) -> None:
+        """Reject unsafe production settings without including their values in errors."""
+        if self.env.strip().lower() != "production":
+            return
+        errors = []
+        if len(self.session_secret.strip()) < 32:
+            errors.append("SOE_SESSION_SECRET must contain at least 32 characters")
+        if not (self.admin_password.strip() or self.admin_password_hash.strip()):
+            errors.append("SOE_ADMIN_PASSWORD or SOE_ADMIN_PASSWORD_HASH is required")
+        if self.demo_mode:
+            errors.append("SOE_DEMO_MODE must be false")
+        origins = [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        if not origins or any("*" in origin for origin in origins):
+            errors.append("SOE_CORS_ORIGINS must contain explicit origins without wildcards")
+        if self.database_url.strip().lower().startswith("sqlite"):
+            errors.append("SOE_DATABASE_URL must use a production database, not SQLite")
+        if errors:
+            raise RuntimeError("Invalid production configuration: " + "; ".join(errors))
+
     model_config = SettingsConfigDict(env_prefix="SOE_", env_file=".env", extra="ignore")
 
 
