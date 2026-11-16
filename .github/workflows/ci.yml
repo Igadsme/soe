@@ -13,7 +13,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r backend/requirements.txt
-      - run: PYTHONPATH=backend pytest -q
+      - run: pip install -e ".[dev]"
+      - run: PYTHONPATH=backend pytest -q backend/tests tests
   frontend:
     runs-on: ubuntu-latest
     steps:
