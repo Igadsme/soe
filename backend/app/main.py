@@ -25,8 +25,7 @@ from .transcription import FasterWhisperTranscriber, TranscriptionUnavailable
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
-    if settings.env == "production" and (not settings.session_secret or (not settings.admin_password and not settings.admin_password_hash)):
-        raise RuntimeError("SOE_SESSION_SECRET and production admin credentials are required")
+    settings.validate_production()
     yield
 
 

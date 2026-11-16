@@ -1,8 +1,17 @@
 #!/bin/sh
 set -eu
 
-alembic upgrade head
+# Validate before migrations or custom worker commands can touch production data.
+python -c 'from app.config import settings; settings.validate_production()'
+case "${SOE_RUN_MIGRATIONS:-true}" in
+  [Tt][Rr][Uu][Ee]) alembic upgrade head ;;
+esac
 if [ "$#" -gt 0 ]; then
   exec "$@"
 fi
-exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
+exec gunicorn app.main:app \
+  --worker-class uvicorn.workers.UvicornWorker \
+  --workers "${SOE_WEB_CONCURRENCY:-2}" \
+  --bind "0.0.0.0:${PORT:-8000}" \
+  --timeout 120 --graceful-timeout 30 \
+  --access-logfile - --error-logfile -
