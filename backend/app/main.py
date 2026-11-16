@@ -24,6 +24,7 @@ from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from redis.exceptions import RedisError
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -55,6 +56,7 @@ from .models import (
     WorkflowRun,
 )
 from .pipeline import extract_candidates
+from .rate_limit import redis_limited
 from .rights import can_ingest_and_publish, can_publish_to
 from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_media_path
 from .transcription import FasterWhisperTranscriber, TranscriptionUnavailable
@@ -86,6 +88,16 @@ def client_ip(request: Request) -> str:
 
 
 def limited(windows, key: str, limit: int) -> bool:
+    if settings.redis_url.strip():
+        scope = "login" if windows is _login_windows else "general"
+        try:
+            return redis_limited(settings.redis_url, scope, key, limit)
+        except (RedisError, ValueError):
+            # Neither the URL nor exception text is safe to log.
+            logging.getLogger("soe.rate_limit").warning("Redis rate limiter unavailable", extra={"scope": scope})
+            if scope == "login":
+                raise HTTPException(503, "login temporarily unavailable", headers={"Retry-After": "60"}) from None
+            return False
     now = time.monotonic()
     for old in list(windows):
         if not windows[old] or now - windows[old][-1] >= 60:

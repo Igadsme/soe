@@ -32,8 +32,10 @@ Set `SOE_WEB_CONCURRENCY` to change Gunicorn processes per API container and rec
 docker compose -f docker-compose.prod.yml up -d --scale worker=2
 ```
 
-The current worker advances queued workflows to rights review; it has no atomic claim/locking protocol. Keep one worker for now; multiple replicas can select the same workflow. Add transactional job claiming before relying on parallel processing. Redis is internal and reserved for future queue integration; the current worker polls PostgreSQL.
+The current worker advances queued workflows to rights review; it has no atomic claim/locking protocol. Keep one worker for now; multiple replicas can select the same workflow. Add transactional job claiming before relying on parallel processing. Redis is internal and provides shared atomic rate limits; the current worker polls PostgreSQL.
 
 Only API and frontend ports are published, on `127.0.0.1` by default. Terminate HTTPS with a reverse proxy and route to these ports. Named volumes persist PostgreSQL and shared media; configure encrypted backups and test restores. Rebuild the frontend whenever its public API URL changes. Use `.env` and secret-management tooling appropriate for your host; never bake credentials into images.
 
 The existing `docker-compose.yml` remains the development configuration. Production infrastructure does not complete the provider OAuth, publishing, analytics, or durable job-processing features; those still need authorized accounts and further implementation.
+
+Production requires `SOE_REDIS_URL` (Compose defaults API/worker to `redis://redis:6379/0`). All API workers/replicas must share this Redis database. General and login counters use 60-second fixed windows starting with the first request, with the existing limits. If Redis fails, general requests fail open with a sanitized warning; login fails closed with HTTP 503, `login temporarily unavailable`, and `Retry-After: 60`. Empty URLs use the in-memory sliding windows only in development/tests; production validation rejects them. Redis data loss clears counters.

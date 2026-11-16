@@ -8,7 +8,7 @@
 - [x] HMAC sessions contain random IDs backed by `auth_sessions` (new migration `0003_auth_sessions`). Logout revokes server-side; expiry and revocation are checked on every request. Previous stateless tokens are invalidated by the format change.
 - [x] HttpOnly session cookies, Secure in production, SameSite=lax, Path=/; logout clears matching attributes. `/api/v1/auth/me` reports the current operator.
 - [x] All cookie-auth mutations except login require matching `soe_csrf` cookie and `X-CSRF-Token`. Frontend requests include credentials and the CSRF header; sign-in/out controls are available.
-- [x] Bounded, stale-evicting per-process rate limits; login has a 5/minute IP+username limit and a 20/minute IP limit. Forwarded IPs require an explicitly trusted peer CIDR. Server-level forwarded rewriting is disabled in the production entrypoint.
+- [x] Shared atomic Redis rate limits (60-second fixed windows, required in production), with bounded in-memory development fallback; login has a 5/minute IP+username limit and a 20/minute IP limit. Forwarded IPs require an explicitly trusted peer CIDR. Server-level forwarded rewriting is disabled in the production entrypoint.
 - [x] Media paths resolve inside `SOE_MEDIA_ROOT`, including a check at processing time; title/query/platform/ID validation; randomized upload names, MIME/signature checks and size limit. Signature checks are basic, not a full malware/media sandbox.
 - [x] Security headers including production HSTS; explicit credentialed CORS allowlist. Generic failures with request IDs, JSON access logging without query strings/cookies; HTTP-client URL logging disabled. Secret settings use `SecretStr`.
 - [x] Liveness does not touch the DB. Readiness checks DB connectivity and Alembic head. SQLAlchemy uses **synchronous** sessions.
@@ -66,7 +66,7 @@
 ### 7. Secret management, scaling and monitoring
 
 1. Select a secret manager (cloud-native or Vault), restrict deployment identity access, inject values at runtime, and configure rotation. Do not put secrets in frontend variables, image layers or logs. Configure log collection to omit query strings and credentials at the proxy/hosting layer too.
-2. Implement Redis-backed atomic rate limits before multiple API workers/replicas or public traffic: current windows are bounded **per process**, and restart clears them. Compose includes Redis but application rate limiting does not use it.
+2. Monitor Redis availability: general rate limiting fails open with a sanitized warning; login fails closed with 503 “login temporarily unavailable” and Retry-After: 60. Keep all API replicas on the same Redis database (`SOE_REDIS_URL`). Redis restarts/data loss clear counters.
 3. Choose a durable queue, implement locking, retry/backoff, idempotency and dead-letter handling for media/publication jobs. The current sync processing endpoint and small worker are not a production queue.
 4. Configure centralized JSON log retention/search and request-ID correlation, service/database/queue metrics, uptime/readiness alerts, disk/upload capacity alerts, provider quota alerts and error tracking with secret/PII scrubbing. Current error logs intentionally omit raw exceptions; add sanitized diagnostics before operational use.
 5. Complete security review, adversarial media testing/sandboxing, abuse controls, rights/legal review, retention/deletion policy, browser E2E and disaster recovery/load drills. Single-operator auth does not provide tenant isolation or user roles.
