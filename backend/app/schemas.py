@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
 class SourceCreate(BaseModel):
@@ -35,6 +35,12 @@ class ClipRead(Highlight):
     output_path: str | None = None
     subtitle_path: str | None = None
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "Highlight":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("end_seconds must be greater than start_seconds")
+        return self
 
 
 class SourceRead(SourceCreate):

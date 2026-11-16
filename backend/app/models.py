@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, Float, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -25,7 +25,7 @@ class Source(Base):
 class RightsRecord(Base):
     __tablename__ = "rights_records"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    source_id: Mapped[int] = mapped_column(Integer, index=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
     authorization_type: Mapped[str] = mapped_column(String(64))
     commercial_use: Mapped[bool] = mapped_column(Boolean, default=False)
     publishing_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -39,7 +39,7 @@ class RightsRecord(Base):
 class Clip(Base):
     __tablename__ = "clips"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    source_id: Mapped[int] = mapped_column(Integer, index=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
     start_seconds: Mapped[float] = mapped_column(Float)
     end_seconds: Mapped[float] = mapped_column(Float)
     description: Mapped[str] = mapped_column(Text)
@@ -55,7 +55,7 @@ class Clip(Base):
 class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    source_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id"), nullable=True)
     state: Mapped[str] = mapped_column(String(64), default="queued")
     cost_cents: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
