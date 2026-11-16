@@ -25,6 +25,6 @@ async def test_discovery_fixture_is_persisted():
 @pytest.mark.asyncio
 async def test_upload_creates_rights_review_source():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/sources/upload", data={"title": "Authorized upload"}, files={"file": ("sample.mp4", b"local-fixture", "video/mp4")})
+        response = await client.post("/api/v1/sources/upload", data={"title": "Authorized upload"}, files={"file": ("sample.mp4", b"\x00\x00\x00\x18ftypisom", "video/mp4")})
     assert response.status_code == 200
     assert response.json()["status"] == "rights_review"

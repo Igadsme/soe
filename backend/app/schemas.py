@@ -1,5 +1,13 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_validator,
+    model_validator,
+)
 
 
 class SourceCreate(BaseModel):
@@ -8,6 +16,22 @@ class SourceCreate(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     url: HttpUrl
     media_path: str | None = None
+
+
+    @field_validator("media_path")
+    @classmethod
+    def validate_media_path(cls, value):
+        return safe_media_path(value) if value else value
+
+
+def safe_media_path(value: str) -> str:
+    from pathlib import Path
+
+    from .config import settings
+    resolved = Path(value).resolve()
+    if not resolved.is_relative_to(Path(settings.media_root).resolve()):
+        raise ValueError("media_path must be inside SOE_MEDIA_ROOT")
+    return str(resolved)
 
 
 class RightsCreate(BaseModel):

@@ -4,6 +4,10 @@ Date: 2026-11-13
 Branch: `feat/complete-soe`
 Repository: `Igadsme/soe`
 
+## Status update — Phase B
+
+The control plane now includes database-revocable HMAC sessions, CSRF protection, login throttling, constrained media paths/uploads, request IDs and security headers, dependency remediation, quality checks and backup/restore tooling. Production workflow changes are proposed only in `infra/ci/ci.yml`. Public launch remains blocked on owner provisioning, HTTPS, secret management, encrypted off-site backups, shared rate limiting/queue, monitoring and completed OAuth publishing. See `PRODUCTION_READINESS.md` for the current Done/Remaining checklist. Historical milestone descriptions below reflect the earlier implementation. The separate `src/soe` scaffold and `tests/test_app.py` remain unchanged pending the owner decision.
+
 ## A. Executive summary
 
 The original repository was an M0 prototype with a static dashboard, four database models, two tests, and no real provider, media, publishing, or analytics pipeline. This branch extends it with persistent discovery records, official YouTube/Twitch adapter boundaries, explicit fixture mode, fail-closed rights scope checks, Alembic migration scaffolding, bundled FFmpeg, Faster-Whisper transcription, durable workflow worker, publication/metric/ledger schemas, structured JSON logging, an API-backed discovery dashboard, and Compose health/worker configuration.

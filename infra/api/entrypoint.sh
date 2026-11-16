@@ -14,4 +14,4 @@ exec gunicorn app.main:app \
   --workers "${SOE_WEB_CONCURRENCY:-2}" \
   --bind "0.0.0.0:${PORT:-8000}" \
   --timeout 120 --graceful-timeout 30 \
-  --access-logfile - --error-logfile -
+  --forwarded-allow-ips "" --error-logfile -

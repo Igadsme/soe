@@ -1,11 +1,12 @@
 """Authorized local media handling and FFmpeg-backed render validation."""
-from dataclasses import dataclass
 import hashlib
-from pathlib import Path
+import json
+import re
 import shutil
 import subprocess
-import re
-import json
+from dataclasses import dataclass
+from pathlib import Path
+
 from .config import settings
 
 
@@ -24,7 +25,7 @@ class MediaProbe:
 def detect_scene_boundaries(path: Path, threshold: float = 0.35) -> list[float]:
     """Detect scene boundaries using FFmpeg's scene score filter."""
     expression = f"select=gt(scene\\,{threshold}),showinfo"
-    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-vf", expression, "-an", "-f", "null", "-"], capture_output=True, text=True)
+    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-vf", expression, "-an", "-f", "null", "-"], capture_output=True, text=True)  # noqa: S603 -- argv list, trusted executable, no shell.
     return [float(match) for match in re.findall(r"pts_time:([0-9]+(?:\\.[0-9]+)?)", result.stderr)]
 
 
@@ -52,13 +53,13 @@ def _binary(name: str) -> str:
 def probe(path: Path) -> MediaProbe:
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
-        result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], capture_output=True, text=True, check=True)
+        result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], capture_output=True, text=True, check=True)  # noqa: S603 -- argv list, trusted executable, no shell.
         body = json.loads(result.stdout)
         video = next((s for s in body.get("streams", []) if s.get("codec_type") == "video"), None)
         if not video:
             raise MediaProcessingError("media has no video stream")
         return MediaProbe(float(body["format"]["duration"]), int(video["width"]), int(video["height"]), any(s.get("codec_type") == "audio" for s in body.get("streams", [])))
-    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-f", "null", "-"], capture_output=True, text=True)
+    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-f", "null", "-"], capture_output=True, text=True)  # noqa: S603 -- argv list, trusted executable, no shell.
     text = result.stderr
     duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
     video_match = re.search(r"Video: .*?(\d{2,5})x(\d{2,5})", text)
@@ -85,7 +86,7 @@ def render_vertical(source: Path, output: Path, start: float, end: float, subtit
     vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1"
     if subtitle_file:
         vf += f",subtitles={subtitle_file.as_posix()}"
-    subprocess.run([_binary("ffmpeg"), "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", str(output)], capture_output=True, text=True, check=True)
+    subprocess.run([_binary("ffmpeg"), "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", str(output)], capture_output=True, text=True, check=True)  # noqa: S603 -- argv list, trusted executable, no shell.
     if not output.is_file() or output.stat().st_size == 0:
         raise MediaProcessingError("FFmpeg did not produce a usable output")
     return output

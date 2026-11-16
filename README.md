@@ -5,16 +5,16 @@ Soe is an authorization-first content intelligence and clipping platform. This r
 ## Quick start
 
 ```bash
-cp .env.example .env
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r backend/requirements.txt
+PYTHONPATH=backend alembic upgrade head
 uvicorn app.main:app --app-dir backend --reload
 ```
 
-Open http://localhost:8000/docs for the API or http://localhost:3000 after starting the frontend:
+With no `.env`, development defaults use SQLite and a demo-only authentication bypass. If a production `.env` exists, use a separate shell/worktree or explicitly override production settings before running locally. API docs are disabled; liveness is at http://localhost:8000/health. Open http://localhost:3000 after starting the frontend:
 
 ```bash
-npm install --prefix frontend
+npm ci --prefix frontend
 npm run dev --prefix frontend
 ```
 
@@ -25,3 +25,5 @@ This build deliberately does not claim live platform publishing, revenue, or rig
 ## Current status
 
 M0 is implemented, plus the core MVP domain contracts: source registry, rights gate, deterministic ranking, pipeline execution records, and dashboard overview. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+
+For production, copy `.env.example` to `.env`, replace placeholders using [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md), and use `docker compose -f docker-compose.prod.yml up --build -d`. The product is **not ready for public launch** until the documented owner actions are complete. See [BACKUP_RESTORE.md](BACKUP_RESTORE.md) and run `scripts/ci_checks.sh` for local quality checks. `src/soe` is a separate unused scaffold retained for an owner decision; the production API is `backend/app`.
