@@ -13,26 +13,40 @@ def _key() -> bytes:
     return settings.session_secret.encode()
 
 
+def _b64encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _sign(payload_b64: str) -> str:
+    return hmac.new(_key(), payload_b64.encode("ascii"), "sha256").hexdigest()
+
+
 def make_session(username: str) -> str:
+    """Return a signed session token: ``<base64url(payload)>.<hex(hmac-sha256)>``.
+
+    Neither part can contain ``.``, so the token always splits unambiguously.
+    """
     expires = int(time.time()) + settings.session_ttl_seconds
-    payload = f"{username}:{expires}".encode()
-    signature = hmac.new(_key(), payload, "sha256").digest()
-    return base64.urlsafe_b64encode(payload + b"." + signature).decode()
+    payload_b64 = _b64encode(f"{username}:{expires}".encode())
+    return f"{payload_b64}.{_sign(payload_b64)}"
 
 
 def verify_session(value: str | None) -> str:
     if not value:
         raise HTTPException(401, "authentication required")
     try:
-        decoded = base64.urlsafe_b64decode(value.encode())
-        payload, signature = decoded.rsplit(b".", 1)
-        if not hmac.compare_digest(signature, hmac.new(_key(), payload, "sha256").digest()):
+        payload_b64, signature = value.split(".")
+        if not hmac.compare_digest(signature.encode("ascii"), _sign(payload_b64).encode("ascii")):
             raise ValueError
-        username, expiry = payload.decode().rsplit(":", 1)
+        username, expiry = _b64decode(payload_b64).decode().rsplit(":", 1)
         if int(expiry) < int(time.time()):
             raise ValueError
         return username
-    except (ValueError, UnicodeDecodeError, TypeError):
+    except (ValueError, UnicodeError, TypeError):
         raise HTTPException(401, "invalid or expired session")
 
 

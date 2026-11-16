@@ -19,5 +19,4 @@ dev = [
   "httpx>=0.27.0",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+# pytest configuration lives in pytest.ini (it takes precedence over this file).
