@@ -7,7 +7,8 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from .db import Base, engine, session
 from .auth import make_session, require_auth, verify_password
@@ -24,7 +25,8 @@ from .transcription import FasterWhisperTranscriber, TranscriptionUnavailable
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
-    Base.metadata.create_all(engine)
+    if settings.env == "production" and (not settings.session_secret or (not settings.admin_password and not settings.admin_password_hash)):
+        raise RuntimeError("SOE_SESSION_SECRET and production admin credentials are required")
     yield
 
 
@@ -55,6 +57,15 @@ async def security_middleware(request: Request, call_next):
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "service": "soe-api"}
+
+
+@app.get("/ready")
+async def ready(db: Session = Depends(session)) -> dict:
+    try:
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        raise HTTPException(503, "database unavailable") from exc
+    return {"status": "ready", "service": "soe-api"}
 
 
 @app.post("/api/v1/auth/login")

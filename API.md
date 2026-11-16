@@ -1,6 +1,7 @@
 # API
 
 - `GET /health` — service health.
+- `GET /ready` — database readiness; returns `503` when the database is unavailable.
 - `GET /api/v1/overview` — persisted counts and explicitly verified financial totals.
 - `POST /api/v1/sources` — register a YouTube/Twitch metadata source.
 - `GET /api/v1/sources` — list registered sources.
