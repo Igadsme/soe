@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     rate_limit_per_minute: int = 120
     trusted_proxies: str = ""
+    redis_url: str = Field(default="", repr=False)
 
     @field_validator("env")
     @classmethod
@@ -44,6 +45,8 @@ class Settings(BaseSettings):
             errors.append("SOE_CORS_ORIGINS must contain explicit origins without wildcards")
         if self.database_url.strip().lower().startswith("sqlite"):
             errors.append("SOE_DATABASE_URL must use a production database, not SQLite")
+        if not self.redis_url.strip():
+            errors.append("SOE_REDIS_URL is required")
         if errors:
             raise RuntimeError("Invalid production configuration: " + "; ".join(errors))
 

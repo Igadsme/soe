@@ -7,6 +7,7 @@ from app.config import Settings
 def production_settings(**overrides):
     values = dict(
         env="production",
+        redis_url="redis://redis:6379/0",
         session_secret="test-placeholder-" * 3,
         admin_password="test-only-password",
         admin_password_hash="",
@@ -24,6 +25,8 @@ def test_valid_production_settings():
 
 
 @pytest.mark.parametrize(("overrides", "variable"), [
+    ({"redis_url": ""}, "SOE_REDIS_URL"),
+    ({"redis_url": "   "}, "SOE_REDIS_URL"),
     ({"session_secret": ""}, "SOE_SESSION_SECRET"),
     ({"session_secret": "short"}, "SOE_SESSION_SECRET"),
     ({"admin_password": "", "admin_password_hash": ""}, "SOE_ADMIN_PASSWORD"),
