@@ -1,10 +1,10 @@
 # Roadmap
 
-- [x] M0: repository, configuration, async API, database schema, Docker Compose, dashboard shell, tests.
-- [ ] M1: official YouTube/Twitch metadata adapters and scheduled discovery.
-- [x] M2 foundation: rights registry and fail-closed gate.
-- [ ] M3-M5: media ingestion, Faster-Whisper/OpenCV/PySceneDetect analysis, evidence-backed highlight extraction, FFmpeg rendering.
-- [ ] M6: complete dashboard workflows.
-- [ ] M7: OAuth publishing adapters with review mode.
-- [ ] M8-M9: verified analytics, cost ledger, and learned ranking feedback.
-- [ ] M10: durable orchestration, alerts, budgets, and cloud deployment hardening.
+- [~] M0: foundation, migration, logging, Compose worker/healthcheck, dashboard, tests; production auth/ingress not complete.
+- [~] M1: official YouTube/Twitch adapters and explicit fixture discovery; live credentials/scheduling not verified.
+- [~] M2: rights registry, platform scope, fail-closed gate, local ingestion boundary; real authorized media not verified.
+- [~] M3-M5: media probe, Faster-Whisper and FFmpeg boundaries, evidence-backed highlights; runtime binaries/models unavailable.
+- [~] M6: API-backed overview/discovery dashboard; remaining operational pages and auth are incomplete.
+- [~] M7: publication ledger and rights-gated queue; OAuth and live publishing blocked.
+- [~] M8-M9: metric/ledger schemas and transparent ranking; provider imports and learning loop incomplete.
+- [~] M10: durable worker boundary and Compose healthcheck; Docker/cloud/alerts/backups unverified.

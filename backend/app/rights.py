@@ -8,3 +8,7 @@ def can_ingest_and_publish(record: RightsRecord, at: datetime | None = None) -> 
     if record.revoked or not record.commercial_use or not record.publishing_allowed:
         return False
     return record.expires_at is None or record.expires_at > at
+
+
+def can_publish_to(record: RightsRecord, platform: str, at: datetime | None = None) -> bool:
+    return can_ingest_and_publish(record, at) and (not record.allowed_platforms or platform in record.allowed_platforms)

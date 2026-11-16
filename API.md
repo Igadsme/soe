@@ -7,3 +7,12 @@
 - `POST /api/v1/sources/{id}/rights` — attach an authorization record; fails closed for non-commercial or non-publishing permissions.
 - `GET /api/v1/clips` — list ranked clip candidates.
 - `POST /api/v1/demo/pipeline` — create clearly labeled local fixture records; performs no fake media processing.
+- `POST /api/v1/discovery/search?platform=youtube|twitch&query=...` — use an official adapter when credentials exist, otherwise an explicitly labeled fixture in development mode.
+- `GET /api/v1/publications` — list publication queue/history records.
+- `POST /api/v1/clips/{id}/publish?platform=...` — rights-gated queue operation; disabled unless `SOE_PUBLISHING_ENABLED=true`.
+- `GET /api/v1/analytics` — separate verified and unverified metric observations.
+- `POST /api/v1/auth/login` / `POST /api/v1/auth/logout` — signed HttpOnly session lifecycle; development mode is explicitly bypassed only when no admin password is configured.
+- `POST /api/v1/sources/upload` — validated local video upload, initially stored as `rights_review`.
+- `POST /api/v1/sources/{id}/process` — rights-gated real Faster-Whisper + FFmpeg processing and clip persistence.
+- `GET /api/v1/clips/{id}/download` — authenticated rendered MP4 download.
+- `GET /api/v1/revenue`, `GET /api/v1/agents`, `GET /api/v1/settings` — verified ledger entries, agent capability status, and safe non-secret runtime configuration.
