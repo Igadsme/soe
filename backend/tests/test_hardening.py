@@ -142,6 +142,17 @@ async def test_upload_signature_size_and_sanitization(client, monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_zero_byte_upload_requires_auth_and_produces_no_output(client, tmp_path):
+    response = await client.post(
+        "/api/v1/sources/upload",
+        data={"title": "empty"},
+        files={"file": ("empty.mp4", b"", "video/mp4")},
+    )
+    assert response.status_code == 401
+    assert not (tmp_path / "media").exists()
+
+
+@pytest.mark.asyncio
 async def test_security_headers_request_id_and_generic_500(client):
     response = await client.get("/health", headers={"X-Request-ID": "test-request-123"})
     assert response.json() == {"status": "ok", "service": "soe-api"}
