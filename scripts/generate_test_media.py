@@ -1,5 +1,6 @@
 """Generate original, locally owned media for integration tests."""
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -12,6 +13,24 @@ OUT.mkdir(parents=True, exist_ok=True)
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 
+def synthesize_speech(text: str, stem: Path) -> Path:
+    """Write spoken ``text`` to an audio file using a local TTS engine.
+
+    macOS ``say`` is used when present; on Linux ``espeak-ng`` (or ``espeak``) is used.
+    Real speech is required because the pipeline ranks transcript segments.
+    """
+    if shutil.which("say"):
+        audio = stem.with_suffix(".aiff")
+        subprocess.run(["say", text, "-o", str(audio)], check=True)
+        return audio
+    for engine in ("espeak-ng", "espeak"):
+        if shutil.which(engine):
+            audio = stem.with_suffix(".wav")
+            subprocess.run([engine, "-s", "150", "-w", str(audio), text], check=True)
+            return audio
+    sys.exit("No text-to-speech engine found: install espeak-ng (apt-get install espeak-ng) or run on macOS (say).")
+
+
 def main() -> None:
     fixtures = [
         ("authorized_test_source.mp4", "This is an original authorized test video. The surprising moment is clearly marked for clipping.", "testsrc2=size=1280x720:rate=30", 6),
@@ -19,9 +38,8 @@ def main() -> None:
         ("authorized_test_source_pattern.mp4", "This is an original visual pattern test. The high contrast scene change is intentional and authorized.", "color=c=navy:size=1280x720:rate=30", 8),
     ]
     for filename, text, pattern, duration in fixtures:
-        audio = OUT / f"{Path(filename).stem}.aiff"
         video = OUT / filename
-        subprocess.run(["say", text, "-o", str(audio)], check=True)
+        audio = synthesize_speech(text, OUT / Path(filename).stem)
         subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i", pattern, "-stream_loop", "-1", "-i", str(audio), "-t", str(duration), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(video)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(video)
 
