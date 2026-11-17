@@ -58,7 +58,7 @@ from .models import (
     Source,
     WorkflowRun,
 )
-from .rate_limit import async_redis_limited, redis_ready
+from .rate_limit import async_redis_limited, close_redis_clients, redis_ready
 from .rights import can_ingest_and_publish, can_publish_to
 from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_media_path
 
@@ -69,7 +69,12 @@ async def lifespan(_: FastAPI):
     from .observability import init_sentry
     init_sentry()
     settings.validate_production()
-    yield
+    if settings.env in {"production", "staging"} and not settings.trusted_proxies.strip():
+        logging.getLogger("soe.security").warning("SOE_TRUSTED_PROXIES is empty; configure trusted ingress peers when deployed behind a proxy")
+    try:
+        yield
+    finally:
+        await close_redis_clients()
 
 
 app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -77,11 +82,11 @@ app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in setti
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
-_login_backoffs: dict[str, tuple[int, float]] = {}
+_login_backoffs: dict[tuple[str, str], tuple[int, float]] = {}
 _LOGIN_BACKOFF_MAX = 10000
 
 
-def _prune_login_backoffs(protect: str) -> None:
+def _prune_login_backoffs(protect: tuple[str, str]) -> None:
     """Bound backoff memory without letting username flooding reset the admin backoff."""
     if len(_login_backoffs) < _LOGIN_BACKOFF_MAX:
         return
@@ -218,11 +223,12 @@ async def ready(db: Session = Depends(session)) -> dict:
 
 @app.post("/api/v1/auth/login")
 async def login(request: Request, username: str = Form(..., max_length=255), password: str = Form(..., max_length=1024)) -> JSONResponse:
-    key = "user:" + username.casefold()
+    ip = client_ip(request)
+    key = (username.casefold(), ip)
     failures, blocked_until = _login_backoffs.get(key, (0, 0))
     if time.monotonic() < blocked_until:
         raise HTTPException(429, "login temporarily unavailable", headers={"Retry-After": str(max(1, int(blocked_until - time.monotonic())))})
-    if await request_limited(_login_windows, key, 5) or await request_limited(_login_windows, "ip:" + client_ip(request), 20):
+    if await request_limited(_login_windows, "pair:" + repr(key), 5) or await request_limited(_login_windows, "ip:" + ip, 20) or await request_limited(_login_windows, "user:" + username.casefold(), 30):
         raise HTTPException(429, "login temporarily unavailable", headers={"Retry-After": "60"})
     if not settings.admin_password_hash and not settings.admin_password:
         if development_bypass(request):
@@ -230,7 +236,7 @@ async def login(request: Request, username: str = Form(..., max_length=255), pas
         raise HTTPException(503, "authentication is not configured")
     password_ok = await run_in_threadpool(verify_password, password, secret_value(settings.admin_password_hash)) if settings.admin_password_hash else settings.env == "development" and hmac.compare_digest(password.encode(), secret_value(settings.admin_password).encode())
     if not hmac.compare_digest(username.encode(), settings.admin_username.encode()) or not password_ok:
-        _prune_login_backoffs(protect="user:" + settings.admin_username.casefold())
+        _prune_login_backoffs(protect=(settings.admin_username.casefold(), ip))
         failures += 1
         _login_backoffs[key] = (failures, time.monotonic() + (min(3600, 2 ** min(failures - 4, 12)) if failures >= 5 else 0))
         raise HTTPException(401, "invalid credentials")

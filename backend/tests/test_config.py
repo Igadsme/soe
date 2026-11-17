@@ -70,3 +70,20 @@ def test_tests_ignore_working_directory_dotenv(tmp_path, monkeypatch):
     assert config.database_url == 'sqlite://'
     assert not config.admin_password
     assert not (tmp_path / 'wrong-test-db.db').exists()
+
+
+@pytest.mark.parametrize('env', ['production', 'staging'])
+@pytest.mark.parametrize('token', ['', '   '])
+def test_metrics_require_token_in_production(env, token):
+    with pytest.raises(RuntimeError, match='SOE_METRICS_TOKEN is required'):
+        production_settings(env=env, metrics_enabled=True, metrics_token=token).validate_production()
+    production_settings(env=env, metrics_enabled=True, metrics_token='test-token').validate_production()
+
+
+def test_production_warns_when_proxy_trust_is_empty(monkeypatch, caplog):
+    from app import main
+    monkeypatch.setattr(main, 'settings', production_settings(trusted_proxies=''))
+    monkeypatch.setattr(main, 'configure_logging', lambda: None)
+    with TestClient(main.app):
+        pass
+    assert 'SOE_TRUSTED_PROXIES is empty' in caplog.text

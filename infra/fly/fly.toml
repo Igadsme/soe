@@ -16,6 +16,10 @@ primary_region = "iad"
   PORT = "8000"
   SOE_WEB_CONCURRENCY = "1"
   SOE_METRICS_ENABLED = "false"
+  # Required before use: replace empty value with verified ingress proxy CIDRs.
+  # Expected private 6PN peers; do not trust the entire organization network blindly.
+  # Fly sets Fly-Client-IP; this backend reads X-Forwarded-For. See DEPLOYMENT.md.
+  SOE_TRUSTED_PROXIES = ""
   SOE_MEDIA_ROOT = "/app/media"
 
 [http_service]

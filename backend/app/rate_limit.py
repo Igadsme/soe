@@ -3,6 +3,7 @@ import asyncio
 import time
 from contextlib import suppress
 from hashlib import sha256
+from weakref import WeakKeyDictionary
 
 from redis.asyncio import Redis as AsyncRedis
 
@@ -21,6 +22,22 @@ return 0
 """
 
 
+_clients = WeakKeyDictionary()
+
+
+def _redis_client(url: str):
+    clients = _clients.setdefault(asyncio.get_running_loop(), {})
+    if url not in clients:
+        clients[url] = AsyncRedis.from_url(url, socket_connect_timeout=0.2, socket_timeout=0.2)
+    return clients[url]
+
+
+async def close_redis_clients():
+    for client in _clients.pop(asyncio.get_running_loop(), {}).values():
+        with suppress(Exception):
+            await asyncio.wait_for(client.aclose(), 0.2)
+
+
 _failures = 0
 _open_until = 0.0
 
@@ -30,8 +47,8 @@ async def async_redis_limited(url: str, scope: str, key: str, limit: int) -> boo
     from redis.exceptions import ConnectionError
     if time.monotonic() < _open_until:
         raise ConnectionError("circuit open")
-    client = AsyncRedis.from_url(url, socket_connect_timeout=0.2, socket_timeout=0.2)
     try:
+        client = _redis_client(url)
         digest = sha256(key.encode()).hexdigest()
         result = await asyncio.wait_for(client.eval(_COUNTER, 1, f"soe:rl:{scope}:{digest}", limit), 0.2)
         _failures = 0
@@ -41,17 +58,11 @@ async def async_redis_limited(url: str, scope: str, key: str, limit: int) -> boo
         if _failures >= 3:
             _open_until = time.monotonic() + 10
         raise ConnectionError("rate limiter unavailable") from None
-    finally:
-        with suppress(Exception):
-            await asyncio.wait_for(client.aclose(), 0.2)
 
 
 async def redis_ready(url: str) -> bool:
-    client = AsyncRedis.from_url(url, socket_connect_timeout=0.2, socket_timeout=0.2)
     try:
+        client = _redis_client(url)
         return bool(await asyncio.wait_for(client.ping(), 0.2))
     except Exception:
         return False
-    finally:
-        with suppress(Exception):
-            await asyncio.wait_for(client.aclose(), 0.2)
