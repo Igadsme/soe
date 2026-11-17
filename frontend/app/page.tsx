@@ -1,18 +1,13 @@
 "use client";
 import { FormEvent, useEffect, useState } from "react";
 
+import { api, apiFetch } from "./lib/api";
+import { pollJob } from "./lib/pollJob";
+import { RightsForm } from "./components/RightsForm";
+
 type Overview = { environment: string; demo_mode: boolean; counts: Record<string, number>; revenue_cents: number; expense_cents: number };
 type Source = { has_media: boolean; id: number; platform: string; title: string; url: string; status: string };
 type Clip = { id: number; source_id: number; start_seconds: number; end_seconds: number; description: string; hook: string; score: number; status: string };
-const api = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-async function apiFetch(url: string, options: RequestInit = {}) {
-  const headers = new Headers(options.headers);
-  const csrf = document.cookie.split("; ").find((row) => row.startsWith("soe_csrf="))?.split("=").slice(1).join("=");
-  if (csrf && ["POST", "PUT", "DELETE", "PATCH"].includes(options.method ?? "GET")) headers.set("X-CSRF-Token", decodeURIComponent(csrf));
-  const response = await fetch(url, { ...options, headers, credentials: "include" });
-  if (!response.ok && (options.method ?? "GET") === "GET") throw new Error("Unable to load API data.");
-  return response;
-}
 const sections = ["Overview", "Discovery", "Content library", "AI studio", "Publishing", "Analytics", "Revenue", "AI agents", "Settings"];
 
 export default function Home() {
@@ -32,7 +27,7 @@ export default function Home() {
   useEffect(() => { const routes: Record<string, string> = { Publishing: "/api/v1/publications", Analytics: "/api/v1/analytics", Revenue: "/api/v1/revenue", "AI agents": "/api/v1/agents", Settings: "/api/v1/settings" }; if (routes[section]) apiFetch(`${api}${routes[section]}`).then((r) => r.json()).then(setPanelData).catch(() => setError(`Unable to load ${section}.`)); }, [section]);
   const discover = async (event: FormEvent) => { event.preventDefault(); setError(""); const result = await apiFetch(`${api}/api/v1/discovery/search?platform=youtube&query=${encodeURIComponent(query)}`, { method: "POST" }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Discovery failed"); else { setMessage(`${body.created} new sources recorded by ${body.provider}.`); refresh(); } };
   const upload = async (event: FormEvent) => { event.preventDefault(); if (!file) return; const form = new FormData(); form.append("file", file); form.append("title", title); const result = await apiFetch(`${api}/api/v1/sources/upload`, { method: "POST", body: form }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Upload failed"); else { setSelectedSource(body.source_id); setMessage(`Upload accepted as source ${body.source_id}. Add rights approval before processing.`); refresh(); } };
-  const approveRights = async () => { if (!selectedSource) return; const result = await apiFetch(`${api}/api/v1/sources/${selectedSource}/rights`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ authorization_type: "owned", commercial_use: true, publishing_allowed: true, allowed_platforms: ["youtube"], evidence: "Original locally generated test media; operator-approved." }) }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Rights approval failed"); else { setMessage(`Rights approved for source ${body.source_id}.`); refresh(); } };
+  const approveRights = (sourceId: number) => { setMessage(`Rights approved for source ${sourceId}.`); refresh(); };
   const process = async () => {
     if (!selectedSource) return;
     setError("");
@@ -41,19 +36,11 @@ export default function Home() {
       const response = await apiFetch(`${api}/api/v1/sources/${selectedSource}/process`, { method: "POST" });
       const queued = await response.json();
       if (!response.ok) throw new Error(queued.detail ?? "Processing failed");
-      for (;;) {
-        const statusResponse = await apiFetch(`${api}/api/v1/jobs/${queued.job_id}`);
-        const job = await statusResponse.json();
-        if (!statusResponse.ok) throw new Error(job.detail ?? "Could not check job status");
-        setMessage(`Processing: ${job.status}`);
-        if (job.status === "failed") { await refresh(); throw new Error(job.last_error ?? "Processing failed"); }
-        if (job.status === "succeeded") {
-          setMessage(`${job.result.clips_generated} clips rendered from ${job.result.transcript_segments} transcript segments.`);
-          await refresh();
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
+      setMessage(`Processing: ${queued.status}`);
+      const job = await pollJob(queued.job_id, { onStatus: (job) => setMessage(`Processing: ${job.status}`) });
+      await refresh();
+      if (job.status === "failed") throw new Error(job.last_error ?? "Processing failed");
+      setMessage(`${job.result?.clips_generated ?? 0} clips rendered from ${job.result?.transcript_segments ?? 0} transcript segments.`);
     } catch (error) { setError(error instanceof Error ? error.message : "Processing failed"); }
   };
   const signIn = async (event: FormEvent<HTMLFormElement>) => {
@@ -80,6 +67,6 @@ function ServicePanel({ section, data }: { section: string; data: unknown }) { r
 
 function Discovery({ query, setQuery, discover, sources }: { query: string; setQuery: (x: string) => void; discover: (e: FormEvent) => void; sources: Source[] }) { return <div className="panel"><p className="eyebrow">SOURCE DISCOVERY</p><h2>Search authorized platforms</h2><form onSubmit={discover} className="search"><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Topic or niche" required /><button type="submit">Discover</button></form><div className="source-list">{sources.length ? sources.map((source) => <div className="source" key={source.id}><div><b>{source.title}</b><small>{source.platform} · {source.status}</small></div><a href={source.url} target="_blank">Inspect source ↗</a></div>) : <p className="muted">No sources recorded yet.</p>}</div></div>; }
 
-function Studio({ title, setTitle, file, setFile, upload, sources, selectedSource, setSelectedSource, approveRights, process, clips }: { title: string; setTitle: (x: string) => void; file: File | null; setFile: (x: File | null) => void; upload: (e: FormEvent) => void; sources: Source[]; selectedSource: number | null; setSelectedSource: (x: number) => void; approveRights: () => void; process: () => void; clips: Clip[] }) { return <><div className="panel"><p className="eyebrow">AUTHORIZED MEDIA → AI PIPELINE</p><h2>Process a source video</h2><form onSubmit={upload} className="upload"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Source title" required /><input type="file" accept="video/mp4,video/quicktime,video/webm" onChange={(e) => setFile(e.target.files?.[0] ?? null)} required /><button type="submit">Upload source</button></form><div className="source-list">{sources.filter((s) => s.platform === "upload").map((source) => <button className={`source selectable ${selectedSource === source.id ? "selected" : ""}`} onClick={() => setSelectedSource(source.id)} key={source.id}><span><b>{source.title}</b><small>Source {source.id} · {source.status}</small></span><span>{selectedSource === source.id ? "Selected" : "Select"}</span></button>)}</div><div className="actions"><button disabled={!selectedSource} onClick={approveRights}>Approve owned rights</button><button disabled={!selectedSource} onClick={process}>Start AI processing</button></div></div><div className="panel"><div className="panel-title"><div><p className="eyebrow">RENDERED OUTPUTS</p><h2>Highlight candidates</h2></div><span className="pill">EVIDENCE-BACKED</span></div>{clips.length ? clips.filter((clip) => !selectedSource || clip.source_id === selectedSource).map((clip) => <div className="clip" key={clip.id}><div><b>#{clip.id} · {clip.hook}</b><small>{clip.start_seconds.toFixed(2)}s–{clip.end_seconds.toFixed(2)}s · score {clip.score.toFixed(1)} · {clip.status}</small><p>{clip.description}</p></div><a href={`${api}/api/v1/clips/${clip.id}/download`}>Download MP4</a></div>) : <p className="muted">No rendered clips yet.</p>}</div></>; }
+function Studio({ title, setTitle, file, setFile, upload, sources, selectedSource, setSelectedSource, approveRights, process, clips }: { title: string; setTitle: (x: string) => void; file: File | null; setFile: (x: File | null) => void; upload: (e: FormEvent) => void; sources: Source[]; selectedSource: number | null; setSelectedSource: (x: number) => void; approveRights: (sourceId: number) => void; process: () => void; clips: Clip[] }) { return <><div className="panel"><p className="eyebrow">AUTHORIZED MEDIA → AI PIPELINE</p><h2>Process a source video</h2><form onSubmit={upload} className="upload"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Source title" required /><input type="file" accept="video/mp4,video/quicktime,video/webm" onChange={(e) => setFile(e.target.files?.[0] ?? null)} required /><button type="submit">Upload source</button></form><div className="source-list">{sources.filter((s) => s.platform === "upload").map((source) => <button className={`source selectable ${selectedSource === source.id ? "selected" : ""}`} onClick={() => setSelectedSource(source.id)} key={source.id}><span><b>{source.title}</b><small>Source {source.id} · {source.status}</small></span><span>{selectedSource === source.id ? "Selected" : "Select"}</span></button>)}</div><div>{selectedSource && <RightsForm key={selectedSource} sourceId={selectedSource} onApproved={approveRights} />}</div><div className="actions"><button disabled={!selectedSource} onClick={process}>Start AI processing</button></div></div><div className="panel"><div className="panel-title"><div><p className="eyebrow">RENDERED OUTPUTS</p><h2>Highlight candidates</h2></div><span className="pill">EVIDENCE-BACKED</span></div>{clips.length ? clips.filter((clip) => !selectedSource || clip.source_id === selectedSource).map((clip) => <div className="clip" key={clip.id}><div><b>#{clip.id} · {clip.hook}</b><small>{clip.start_seconds.toFixed(2)}s–{clip.end_seconds.toFixed(2)}s · score {clip.score.toFixed(1)} · {clip.status}</small><p>{clip.description}</p></div><a href={`${api}/api/v1/clips/${clip.id}/download`}>Download MP4</a></div>) : <p className="muted">No rendered clips yet.</p>}</div></>; }
 
 function Pipeline() { return <div className="panel"><div className="panel-title"><div><p className="eyebrow">PIPELINE</p><h2>Autonomous workflow</h2></div><span className="pill">SAFE MODE</span></div><div className="pipeline">{["DISCOVER", "RIGHTS CHECK", "ANALYZE", "HIGHLIGHTS", "EDIT", "APPROVE", "PUBLISH"].map((step, i) => <div className="step" key={step}><span>{String(i + 1).padStart(2, "0")}</span><b>{step}</b></div>)}</div><p className="note">Publishing stays disabled until a rights record and authorized platform account are present.</p></div>; }
