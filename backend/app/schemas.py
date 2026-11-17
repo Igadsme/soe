@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import (
     BaseModel,
@@ -38,9 +38,28 @@ class RightsCreate(BaseModel):
     authorization_type: str = Field(pattern="^(owned|licensed|explicit_creator_authorization)$")
     commercial_use: bool
     publishing_allowed: bool
-    evidence: str = Field(min_length=5)
+    evidence: str = Field(min_length=20)
     expires_at: datetime | None = None
-    allowed_platforms: list[str] = []
+    allowed_platforms: list[str] = Field(min_length=1)
+
+    @field_validator("evidence")
+    @classmethod
+    def evidence_content(cls, value):
+        if len("".join(value.split())) < 20:
+            raise ValueError("evidence requires 20 non-whitespace characters")
+        return value
+
+    @field_validator("allowed_platforms")
+    @classmethod
+    def platforms(cls, value):
+        if not set(value) <= {"youtube", "twitch", "tiktok", "instagram", "upload"}:
+            raise ValueError("unknown platform")
+        return value
+
+    @field_validator("expires_at")
+    @classmethod
+    def utc_expiry(cls, value):
+        return value.replace(tzinfo=value.tzinfo or timezone.utc) if value else value
 
 
 class Highlight(BaseModel):

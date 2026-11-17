@@ -78,14 +78,12 @@ def test_transcriber_fake_model(monkeypatch, tmp_path):
     class Model:
         def __init__(self, *args, **kwargs): calls.append((args, kwargs))
         def transcribe(self, audio, **kwargs):
-            assert len(audio) == 2 and kwargs['word_timestamps']
+            assert audio == str(tmp_path) and kwargs['word_timestamps']
             return [SimpleNamespace(start=0, end=1, text=' words '), SimpleNamespace(start=1, end=2, text=' ')], None
     monkeypatch.setitem(sys.modules, 'faster_whisper', SimpleNamespace(WhisperModel=Model))
-    monkeypatch.setattr(transcription, '_binary', lambda _: '/ffmpeg')
-    monkeypatch.setattr(transcription.subprocess, 'run', lambda *a, **k: result(stdout=b'\x00\x00\xff\x7f'))
     segments = transcription.FasterWhisperTranscriber('tiny').transcribe(tmp_path)
     assert segments[0].text == 'words' and len(segments) == 1
-    assert calls[0] == (('tiny',), {'device': 'auto', 'compute_type': 'int8'})
+    assert calls[0] == (('tiny',), {'device': 'auto', 'compute_type': 'int8', 'download_root': transcription.settings.whisper_cache_dir})
     monkeypatch.setitem(sys.modules, 'faster_whisper', None)
     with pytest.raises(transcription.TranscriptionUnavailable): transcription.FasterWhisperTranscriber()
 

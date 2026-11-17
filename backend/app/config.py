@@ -6,8 +6,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = Field(default="sqlite:///./soe.db", repr=False)
-    env: str = "development"
-    demo_mode: bool = True
+    env: str = "production"
+    demo_mode: bool = False
+    dev_auth_bypass: bool = False
+    session_idle_seconds: int = 1800
+    ffmpeg_timeout_seconds: float = 300
+    max_source_seconds: float = 3600
+    whisper_cache_dir: str = "/app/.cache/whisper"
     media_root: str = "./media"
     max_upload_bytes: int = 2_000_000_000
     max_clip_seconds: int = 180
@@ -30,17 +35,24 @@ class Settings(BaseSettings):
     @field_validator("env")
     @classmethod
     def normalize_environment(cls, value: str) -> str:
-        return value.strip().lower()
+        value = value.strip().lower()
+        if value not in {"development", "test", "staging", "production"}:
+            raise ValueError("unknown SOE_ENV")
+        return value
 
     def validate_production(self) -> None:
         """Reject unsafe production settings without including their values in errors."""
-        if self.env.strip().lower() != "production":
+        if self.env not in {"production", "staging"}:
             return
         errors = []
+        if secret_value(self.admin_password):
+            errors.append("SOE_ADMIN_PASSWORD is forbidden; use SOE_ADMIN_PASSWORD_HASH")
+        if self.publishing_enabled:
+            errors.append("SOE_PUBLISHING_ENABLED must be false until media publishing is implemented")
         if len(secret_value(self.session_secret).strip()) < 32:
             errors.append("SOE_SESSION_SECRET must contain at least 32 characters")
-        if not (secret_value(self.admin_password).strip() or secret_value(self.admin_password_hash).strip()):
-            errors.append("SOE_ADMIN_PASSWORD or SOE_ADMIN_PASSWORD_HASH is required")
+        if not secret_value(self.admin_password_hash).strip():
+            errors.append("SOE_ADMIN_PASSWORD_HASH is required")
         if self.demo_mode:
             errors.append("SOE_DEMO_MODE must be false")
         origins = [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

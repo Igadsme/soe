@@ -8,15 +8,8 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from app.media import ingest_authorized, probe, render_vertical
 from app.pipeline import TranscriptSegment, extract_candidates
+from app.subtitles import srt_timestamp
 from app.transcription import FasterWhisperTranscriber
-
-
-def srt_timestamp(seconds: float) -> str:
-    millis = int(round(seconds * 1000))
-    hours, millis = divmod(millis, 3_600_000)
-    minutes, millis = divmod(millis, 60_000)
-    secs, millis = divmod(millis, 1000)
-    return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
 
 def write_srt(path: Path, segments: list[TranscriptSegment], start: float, end: float) -> None:

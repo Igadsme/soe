@@ -14,7 +14,7 @@ RUN if [ "$INSTALL_SYSTEM_FFMPEG" = "true" ]; then \
       apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*; \
     fi \
     && groupadd --gid 10001 soe && useradd --uid 10001 --gid soe --create-home soe \
-    && mkdir /app/media && chown soe:soe /app/media
+    && mkdir -p /app/media /app/.cache/whisper && chown -R soe:soe /app/media /app/.cache
 COPY --from=builder /opt/venv /opt/venv
 COPY backend/app /app/app
 COPY alembic.ini /app/alembic.ini

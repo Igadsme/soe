@@ -25,7 +25,7 @@ class MediaProbe:
 def detect_scene_boundaries(path: Path, threshold: float = 0.35) -> list[float]:
     """Detect scene boundaries using FFmpeg's scene score filter."""
     expression = f"select=gt(scene\\,{threshold}),showinfo"
-    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-vf", expression, "-an", "-f", "null", "-"], capture_output=True, text=True)  # noqa: S603 -- argv list, trusted executable, no shell.
+    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-vf", expression, "-an", "-f", "null", "-"], timeout=settings.ffmpeg_timeout_seconds, capture_output=True, text=True)  # noqa: S603 -- argv list, trusted executable, no shell.
     return [float(match) for match in re.findall(r"pts_time:([0-9]+(?:\\.[0-9]+)?)", result.stderr)]
 
 
@@ -53,13 +53,13 @@ def _binary(name: str) -> str:
 def probe(path: Path) -> MediaProbe:
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
-        result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], capture_output=True, text=True, check=True)  # noqa: S603 -- argv list, trusted executable, no shell.
+        result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], timeout=settings.ffmpeg_timeout_seconds, capture_output=True, text=True, check=True)  # noqa: S603 -- argv list, trusted executable, no shell.
         body = json.loads(result.stdout)
         video = next((s for s in body.get("streams", []) if s.get("codec_type") == "video"), None)
         if not video:
             raise MediaProcessingError("media has no video stream")
         return MediaProbe(float(body["format"]["duration"]), int(video["width"]), int(video["height"]), any(s.get("codec_type") == "audio" for s in body.get("streams", [])))
-    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-f", "null", "-"], capture_output=True, text=True)  # noqa: S603 -- argv list, trusted executable, no shell.
+    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-f", "null", "-"], timeout=settings.ffmpeg_timeout_seconds, capture_output=True, text=True)  # noqa: S603 -- argv list, trusted executable, no shell.
     text = result.stderr
     duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
     video_match = re.search(r"Video: .*?(\d{2,5})x(\d{2,5})", text)
@@ -73,10 +73,13 @@ def ingest_authorized(source_path: str, destination: Path) -> tuple[Path, str, M
     source = Path(source_path).expanduser().resolve()
     if not source.is_file() or source.stat().st_size > settings.max_upload_bytes:
         raise MediaProcessingError("source file is missing or exceeds the configured size limit")
+    metadata = probe(source)
+    if not 0 < metadata.duration <= settings.max_source_seconds:
+        raise MediaProcessingError("source duration exceeds configured limit")
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     digest = sha256_file(destination)
-    return destination, digest, probe(destination)
+    return destination, digest, metadata
 
 
 def render_vertical(source: Path, output: Path, start: float, end: float, subtitle_file: Path | None = None) -> Path:
@@ -86,7 +89,7 @@ def render_vertical(source: Path, output: Path, start: float, end: float, subtit
     vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1"
     if subtitle_file:
         vf += f",subtitles={subtitle_file.as_posix()}"
-    subprocess.run([_binary("ffmpeg"), "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", str(output)], capture_output=True, text=True, check=True)  # noqa: S603 -- argv list, trusted executable, no shell.
+    subprocess.run([_binary("ffmpeg"), "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", str(output)], timeout=settings.ffmpeg_timeout_seconds, capture_output=True, text=True, check=True)  # noqa: S603 -- argv list, trusted executable, no shell.
     if not output.is_file() or output.stat().st_size == 0:
         raise MediaProcessingError("FFmpeg did not produce a usable output")
     return output

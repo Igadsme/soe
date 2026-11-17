@@ -23,7 +23,7 @@ def queued(isolated_database, tmp_path):
         source = Source(platform='upload', external_id='job-source', title='test', url='https://example.com', media_path=str(media))
         db.add(source)
         db.flush()
-        db.add(RightsRecord(source_id=source.id, authorization_type='owned', commercial_use=True, publishing_allowed=True, evidence='owned media'))
+        db.add(RightsRecord(source_id=source.id, authorization_type='owned', commercial_use=True, publishing_allowed=True, allowed_platforms=['youtube'], evidence='owned media'))
         db.commit()
         return source.id
 
@@ -274,6 +274,6 @@ def test_idempotency_key_cannot_cross_sources(queued):
         response = client.post('/api/v1/sources', json={'platform': 'upload', 'external_id': 'second', 'title': 'Second', 'url': 'https://example.com', 'media_path': path})
         assert response.status_code == 201
         source_id = response.json()['id']
-        response = client.post(f'/api/v1/sources/{source_id}/rights', json={'authorization_type':'owned', 'commercial_use':True, 'publishing_allowed':True, 'evidence':'owned media'})
+        response = client.post(f'/api/v1/sources/{source_id}/rights', json={'authorization_type':'owned', 'commercial_use':True, 'publishing_allowed':True, 'allowed_platforms':['youtube'], 'evidence':'Owned media authorization evidence'})
         assert response.status_code == 201 and response.json()['status'] == 'authorized'
         assert client.post(f'/api/v1/sources/{source_id}/process', headers={'Idempotency-Key':'reserved'}).status_code == 409

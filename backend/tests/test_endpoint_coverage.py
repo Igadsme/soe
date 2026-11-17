@@ -56,7 +56,7 @@ def test_discovery_status_and_unavailable(monkeypatch):
 def test_ready_independent_of_cwd(isolated_database, tmp_path, monkeypatch):
     with isolated_database() as db:
         db.execute(text('CREATE TABLE alembic_version (version_num VARCHAR(32))'))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0004_jobs')"))
+        db.execute(text("INSERT INTO alembic_version VALUES ('0005_security')"))
         db.commit()
     monkeypatch.chdir(tmp_path)
     with TestClient(main.app) as client:
@@ -68,4 +68,4 @@ def test_dev_login_demo_and_rights_missing():
         assert client.post('/api/v1/auth/login', data={'username': 'operator', 'password': 'anything'}).json()['mode'] == 'development-bypass'
         assert client.post('/api/v1/auth/logout').status_code == 200
         assert client.post('/api/v1/demo/pipeline').status_code == 200
-        assert client.post('/api/v1/sources/999/rights', json={'authorization_type':'owned', 'commercial_use':True, 'publishing_allowed':True, 'evidence':'test rights'}).status_code == 404
+        assert client.post('/api/v1/sources/999/rights', json={'authorization_type':'owned', 'commercial_use':True, 'publishing_allowed':True, 'allowed_platforms':['youtube'], 'evidence':'Owned media authorization evidence'}).status_code == 404

@@ -19,10 +19,15 @@ services:
       dockerfile: infra/api/Dockerfile
     environment:
       SOE_DATABASE_URL: postgresql://soe:soe@db:5432/soe
-      SOE_DEMO_MODE: "true"
+      SOE_DEV_AUTH_BYPASS: "true"
+      SOE_ADMIN_PASSWORD: development-only-password
+      SOE_SESSION_SECRET: development-only-session-secret-change-for-deployment
       SOE_ENV: development
+      SOE_DEMO_MODE: "true"
       SOE_CORS_ORIGINS: http://localhost:3000
       SOE_WHISPER_MODEL_SIZE: tiny.en
+      SOE_MEDIA_ROOT: /app/media
+    volumes: [soe-media:/app/media]
     ports: ["8000:8000"]
     depends_on:
       db:
@@ -41,8 +46,14 @@ services:
     command: ["python", "-m", "app.worker"]
     environment:
       SOE_DATABASE_URL: postgresql://soe:soe@db:5432/soe
+      SOE_DEV_AUTH_BYPASS: "true"
+      SOE_ADMIN_PASSWORD: development-only-password
+      SOE_SESSION_SECRET: development-only-session-secret-change-for-deployment
+      SOE_ENV: development
       SOE_DEMO_MODE: "true"
       SOE_WHISPER_MODEL_SIZE: tiny.en
+      SOE_MEDIA_ROOT: /app/media
+    volumes: [soe-media:/app/media]
     depends_on:
       db:
         condition: service_healthy
@@ -64,3 +75,4 @@ services:
         condition: service_healthy
 volumes:
   soe-db:
+  soe-media:

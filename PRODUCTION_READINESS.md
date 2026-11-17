@@ -4,17 +4,29 @@
 
 ## Done
 
-- [x] Every application endpoint except login, `/health`, and `/ready` requires a session. Interactive API docs/OpenAPI routes are disabled. Development bypass requires development + demo mode + no password or hash; demo pipeline is development-only.
+- [x] Every application endpoint except login, `/health`, and `/ready` requires a session. Interactive API docs/OpenAPI routes are disabled. Development bypass requires explicit SOE_DEV_AUTH_BYPASS=true + development + loopback client + no password or hash; demo pipeline is development-only.
 - [x] HMAC sessions contain random IDs backed by `auth_sessions` (new migration `0003_auth_sessions`). Logout revokes server-side; expiry and revocation are checked on every request. Previous stateless tokens are invalidated by the format change.
-- [x] HttpOnly session cookies, Secure in production, SameSite=lax, Path=/; logout clears matching attributes. `/api/v1/auth/me` reports the current operator.
-- [x] All cookie-auth mutations except login require matching `soe_csrf` cookie and `X-CSRF-Token`. Frontend requests include credentials and the CSRF header; sign-in/out controls are available.
-- [x] Shared atomic Redis rate limits (60-second fixed windows, required in production), with bounded in-memory development fallback; login has a 5/minute IP+username limit and a 20/minute IP limit. Forwarded IPs require an explicitly trusted peer CIDR. Server-level forwarded rewriting is disabled in the production entrypoint.
+- [x] HttpOnly session cookies, Secure in production/staging, SameSite=lax, Path=/; logout clears matching attributes. `/api/v1/auth/me` reports the current operator.
+- [x] All cookie-auth mutations except login require session-bound HMAC in the `soe_csrf` cookie and `X-CSRF-Token`. Frontend requests include credentials and the CSRF header; sign-in/out controls are available.
+- [x] Shared atomic Redis rate limits (60-second fixed windows, required in production), with bounded in-memory development fallback; login has a 5/minute username limit with exponential backoff independent of IP and a 20/minute IP limit. Forwarded IPs require an explicitly trusted peer CIDR. Server-level forwarded rewriting is disabled in the production entrypoint.
 - [x] Media paths resolve inside `SOE_MEDIA_ROOT`, including a check at processing time; title/query/platform/ID validation; randomized upload names, MIME/signature checks and size limit. Signature checks are basic, not a full malware/media sandbox.
 - [x] Security headers including production HSTS; explicit credentialed CORS allowlist. Generic failures with request IDs, JSON access logging without query strings/cookies; HTTP-client URL logging disabled. Secret settings use `SecretStr`.
-- [x] Liveness does not touch the DB. Readiness checks DB connectivity and Alembic head. SQLAlchemy uses **synchronous** sessions.
+- [x] Liveness does not touch the DB. Readiness checks DB connectivity, Alembic head, and configured Redis. SQLAlchemy uses **synchronous** sessions.
 - [x] Backup/restore scripts and [runbook](BACKUP_RESTORE.md); Ruff, coverage tooling, dependency audits, exact frontend dependency versions, TypeScript checks, and a proposed [CI workflow](infra/ci/ci.yml). Existing `.github/workflows` were not modified.
 
-- [x] DB-backed asynchronous source processing and job polling; fenced, renewable worker leases and retries; hourly session cleanup. Source responses hide absolute media paths. Redis calls run off the event loop. Tests isolate dotenv and database settings and enforce 85% backend coverage.
+- [x] DB-backed asynchronous source processing and job polling; fenced, renewable worker leases and retries; hourly session cleanup. Source responses hide absolute media paths. Redis uses redis.asyncio, a 200ms deadline and a three-failure/10-second circuit breaker (general requests fail open, login fails closed). Tests isolate dotenv and database settings and enforce 85% backend coverage.
+
+- [x] Sentinel: synchronous DB routes execute in the threadpool; worker claim sweeps expired leases into retry/failed and updates workflow state. Active-source partial unique index and SKIP LOCKED claims prevent duplicate work. Clip writes replace prior source clips atomically on success; failed/stale attempts remove their rendered files. Paths include source, workflow run, and lease owner.
+- [x] Pure ASGI body guard authenticates uploads and validates CSRF before reading any bytes; checks declared and streamed size. Other mutation bodies are capped at 64 KiB. Upload extensions and MP4/MOV brands or WebM DocType are checked; all failed uploads remove partial files.
+- [x] Rights require 20 non-whitespace evidence characters and explicit known publication platforms; empty scope denies ingestion/publication. Owned rights require uploads. Naive expiry is normalized to UTC. Duplicate external IDs return 409; provider failures return generic 502/503.
+- [x] FFmpeg/ffprobe have subprocess timeouts; ingest caps media size and duration. Whisper accepts the media file path instead of an in-memory PCM waveform; model cache uses a configurable shared named volume.
+- [x] Production/staging reject plaintext admin passwords and publishing enabled. Unknown environments are rejected; defaults are production and demo off. Development Compose provides explicit development-only login credentials (`operator` / `development-only-password`); bypass remains loopback-only.
+- [x] Migration 0005 adds publication uniqueness and session fingerprint/idle metadata; it invalidates existing sessions and collapses duplicate publication rows to the oldest ID while preserving metric references. Publish requests return the existing (clip, platform) publication.
+- [x] Logout-all, credential fingerprint checks, 30-minute idle timeout with 60-second last-seen write throttle, idle session pruning, session-bound CSRF, PBKDF2 600,000 iterations with stored count, and shared full-hour SRT formatting are implemented.
+
+Legacy `salt$hash` passwords still verify at their original 200,000 iterations and log a warning. Environment-provided hashes cannot be transparently rewritten: regenerate `SOE_ADMIN_PASSWORD_HASH` with the command below to get `pbkdf2_sha256$600000$salt$hash`, deploy it to every replica, and restart. Credential changes invalidate all sessions on the updated replicas.
+
+Publishing remains blocked: **publishing.py's YouTube upload sends metadata only, with no media upload**; **the Instagram adapter puts the access token in the query string**. Implement resumable media upload and move Instagram authentication to a safe authorization header before enabling either adapter. Production/staging refuse the feature flag until that implementation is reviewed.
 
 ## Remaining (owner actions)
 

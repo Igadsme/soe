@@ -1,8 +1,10 @@
 import base64
 import hmac
+import logging
 import secrets
 import time
 from hashlib import pbkdf2_hmac
+from ipaddress import ip_address
 
 from fastapi import HTTPException, Request
 
@@ -37,7 +39,7 @@ def make_session(username: str) -> str:
     expires = int(time.time()) + settings.session_ttl_seconds
     sid = secrets.token_hex(32)
     with SessionLocal() as db:
-        db.add(AuthSession(id=sid, username=username, expires_at=expires))
+        db.add(AuthSession(id=sid, username=username, expires_at=expires, last_seen_at=int(time.time()), password_fingerprint=password_fingerprint()))
         db.commit()
     payload_b64 = _b64encode(f"{username}:{sid}:{expires}".encode())
     return f"{payload_b64}.{_sign(payload_b64)}"
@@ -55,8 +57,11 @@ def verify_session(value: str | None) -> str:
             raise ValueError
         with SessionLocal() as db:
             row = db.get(AuthSession, sid)
-            if not row or row.revoked_at is not None or row.expires_at <= int(time.time()) or row.username != username:
+            if not row or row.revoked_at is not None or row.expires_at <= int(time.time()) or row.username != username or row.password_fingerprint != password_fingerprint() or row.last_seen_at + settings.session_idle_seconds <= int(time.time()):
                 raise ValueError
+            if int(time.time()) - row.last_seen_at >= 60:
+                row.last_seen_at = int(time.time())
+                db.commit()
         return username
     except (ValueError, UnicodeError, TypeError):
         raise HTTPException(401, "invalid or expired session") from None
@@ -68,20 +73,37 @@ def hash_password(password: str, salt: bytes) -> str:
 
 def make_password_hash(password: str) -> str:
     salt = secrets.token_bytes(16)
-    return f"{salt.hex()}${hash_password(password, salt)}"
+    digest = pbkdf2_hmac("sha256", password.encode(), salt, 600_000).hex()
+    return f"pbkdf2_sha256$600000${salt.hex()}${digest}"
 
 
 def verify_password(password: str, stored: str) -> bool:
     try:
-        salt_hex, digest = stored.split("$", 1)
-        salt = bytes.fromhex(salt_hex)
-        return hmac.compare_digest(hash_password(password, salt), digest)
-    except (ValueError, TypeError):
+        if stored.startswith("pbkdf2_sha256$"):
+            _, iterations, salt, digest = stored.split("$")
+            return hmac.compare_digest(pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(iterations)).hex(), digest)
+        salt, digest = stored.split("$")
+        logging.getLogger(__name__).warning("Legacy password hash; regenerate SOE_ADMIN_PASSWORD_HASH with make_password_hash")
+        return hmac.compare_digest(hash_password(password, bytes.fromhex(salt)), digest)
+    except (ValueError, TypeError, OverflowError):
         return False
 
 
-def development_bypass() -> bool:
-    return settings.demo_mode and settings.env == "development" and not settings.admin_password and not settings.admin_password_hash
+def password_fingerprint() -> str:
+    return hmac.new(_key(), (secret_value(settings.admin_password_hash) + secret_value(settings.admin_password)).encode(), "sha256").hexdigest()
+
+
+def csrf_token(session: str) -> str:
+    sid = _b64decode(session.split(".")[0]).decode().rsplit(":", 2)[1]
+    return _sign(sid)
+
+
+def development_bypass(request: Request | None = None) -> bool:
+    try:
+        loopback = request is not None and request.client is not None and ip_address(request.client.host).is_loopback
+    except ValueError:
+        loopback = False
+    return settings.dev_auth_bypass and settings.env == "development" and loopback and not settings.admin_password and not settings.admin_password_hash
 
 
 def revoke_session(value: str) -> None:
@@ -94,12 +116,12 @@ def revoke_session(value: str) -> None:
 
 
 def require_auth(request: Request) -> str:
-    if development_bypass():
+    if development_bypass(request):
         return "development-operator"
     username = verify_session(request.cookies.get("soe_session"))
     if request.method in {"POST", "PUT", "DELETE", "PATCH"}:
         cookie = request.cookies.get("soe_csrf", "")
         header = request.headers.get("X-CSRF-Token", "")
-        if not cookie or not hmac.compare_digest(cookie.encode(), header.encode()):
+        if not cookie or not hmac.compare_digest(csrf_token(request.cookies["soe_session"]).encode(), header.encode()) or not hmac.compare_digest(cookie.encode(), header.encode()):
             raise HTTPException(403, "CSRF validation failed")
     return username

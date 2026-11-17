@@ -17,7 +17,11 @@ class DiscoveredItem:
 
 
 class ProviderUnavailable(RuntimeError):
-    pass
+    status_code = 503
+
+
+class ProviderBadResponse(ProviderUnavailable):
+    status_code = 502
 
 
 def provider_errors(method):
@@ -25,7 +29,9 @@ def provider_errors(method):
     async def wrapped(*args, **kwargs):
         try:
             return await method(*args, **kwargs)
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProviderBadResponse("provider returned invalid data") from exc
+        except httpx.HTTPError as exc:
             raise ProviderUnavailable("provider request failed") from exc
     return wrapped
 

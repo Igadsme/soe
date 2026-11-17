@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -83,6 +84,7 @@ class WorkflowRun(Base):
 
 class Publication(Base):
     __tablename__ = "publications"
+    __table_args__ = (UniqueConstraint("clip_id", "platform", name="uq_publication_clip_platform"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     clip_id: Mapped[int] = mapped_column(Integer, index=True)
     platform: Mapped[str] = mapped_column(String(32))
@@ -119,6 +121,8 @@ class AuthSession(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     username: Mapped[str] = mapped_column(String(255))
     expires_at: Mapped[int] = mapped_column(Integer, index=True)
+    last_seen_at: Mapped[int] = mapped_column(Integer, default=lambda: int(__import__("time").time()))
+    password_fingerprint: Mapped[str] = mapped_column(String(64), default="")
     revoked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
