@@ -360,6 +360,14 @@ def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483
     existing = db.scalar(select(Job).where(Job.idempotency_key == key)) if key else None
     if existing and existing.source_id != source_id:
         raise HTTPException(409, "idempotency key already used")
+    referenced = db.scalar(
+        select(Publication.id)
+        .join(Clip, Clip.id == Publication.clip_id)
+        .where(Clip.source_id == source_id)
+        .limit(1)
+    )
+    if referenced:
+        raise HTTPException(409, "source reruns are disabled while publications reference its clips")
     existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
     if existing:
         return JSONResponse({"job_id": existing.id, "status": existing.status}, status_code=200)

@@ -18,6 +18,7 @@ from .models import (
     AuthSession,
     Clip,
     Job,
+    Publication,
     RightsRecord,
     Source,
     WorkflowRun,
@@ -77,6 +78,24 @@ def renew_lease(job_id: str, worker_id: str) -> None:
         db.commit()
 
 
+def cleanup_unreferenced_output_folders(source_id: int, keep_workflow_id: int) -> int:
+    root = (Path(settings.media_root).resolve() / "clips" / f"source-{source_id}").resolve()
+    if not root.is_dir():
+        return 0
+    with SessionLocal() as db:
+        if db.scalar(select(Publication.id).join(Clip, Clip.id == Publication.clip_id).where(Clip.source_id == source_id).limit(1)):
+            return 0
+    keep = (root / f"run-{keep_workflow_id}").resolve()
+    removed = 0
+    for folder in root.glob("run-*"):
+        folder = folder.resolve()
+        if folder == keep or root not in folder.parents:
+            continue
+        shutil.rmtree(folder, ignore_errors=False)
+        removed += 1
+    return removed
+
+
 def _process_job(job_id: str, worker_id: str) -> None:
     """Compute in claim-specific files, then atomically persist outputs and completion."""
     with SessionLocal() as db:
@@ -114,6 +133,7 @@ def _process_job(job_id: str, worker_id: str) -> None:
         db.execute(update(Source).where(Source.id == source_id).values(status="analyzed", media_sha256=digest))
         db.execute(update(WorkflowRun).where(WorkflowRun.id == workflow_id).values(state="edited", error=None))
         db.commit()
+    cleanup_unreferenced_output_folders(source_id, workflow_id)
 
 
 def process_job(job_id: str, worker_id: str) -> None:

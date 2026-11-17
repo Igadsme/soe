@@ -86,7 +86,7 @@ class Publication(Base):
     __tablename__ = "publications"
     __table_args__ = (UniqueConstraint("clip_id", "platform", name="uq_publication_clip_platform"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    clip_id: Mapped[int] = mapped_column(Integer, index=True)
+    clip_id: Mapped[int] = mapped_column(ForeignKey("clips.id", ondelete="CASCADE"), index=True)
     platform: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), default="queued")
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
