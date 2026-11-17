@@ -1,7 +1,6 @@
 """Regression tests for the independent Sentinel security and worker review."""
 import asyncio
 import os
-import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,20 +8,19 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import HTTPException
-from fastapi.testclient import TestClient
-from pydantic import ValidationError
-from sqlalchemy import select, text, create_engine
-from sqlalchemy.orm import sessionmaker
-from starlette.requests import Request
-
 from app import auth, main, media, rate_limit, worker
 from app.config import Settings
-from app.models import AuthSession, Clip, Job, WorkflowRun
+from app.models import AuthSession, Clip, Job, Publication, WorkflowRun
 from app.rights import can_ingest_and_publish, can_publish_to
 from app.schemas import RightsCreate
 from app.subtitles import srt_timestamp
-from test_jobs import queued, enqueue, stub_media  # noqa: F401
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.orm import sessionmaker
+from starlette.requests import Request
+from test_jobs import enqueue, queued, stub_media  # noqa: F401
 
 
 @pytest.mark.asyncio
@@ -187,11 +185,11 @@ def test_media_timeout_and_duration_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(media, 'probe', lambda _: media.MediaProbe(3601,10,10,True))
     with pytest.raises(media.MediaProcessingError): media.ingest_authorized(str(source), tmp_path/'out.mp4')
     monkeypatch.setattr(media, '_binary', lambda _: '/stub/ffmpeg')
-    def timeout(*args, **kwargs):
-        assert kwargs['timeout'] == media.settings.ffmpeg_timeout_seconds
-        raise subprocess.TimeoutExpired('ffmpeg', kwargs['timeout'])
-    monkeypatch.setattr(media.subprocess, 'run', timeout)
-    with pytest.raises(subprocess.TimeoutExpired): media.render_vertical(source, tmp_path/'out.mp4',0,1)
+    def timeout(argv, timeout):
+        assert timeout == media.settings.ffmpeg_timeout_seconds
+        raise media.MediaProcessingError("media processing exceeded the configured deadline")
+    monkeypatch.setattr(media, 'run_media_command', timeout)
+    with pytest.raises(media.MediaProcessingError, match='deadline'): media.render_vertical(source, tmp_path/'out.mp4',0,1)
 
 
 def test_session_binding_idle_password_change_logout_all(isolated_database, monkeypatch):
@@ -298,7 +296,7 @@ def test_expired_worker_lease_updates_workflow(queued, isolated_database):
 
 
 def test_publication_idempotency_unique_constraint(isolated_database, monkeypatch):
-    from app.models import Source, RightsRecord, Publication
+    from app.models import Publication, RightsRecord, Source
     from sqlalchemy.exc import IntegrityError
     monkeypatch.setattr(main.settings,'publishing_enabled',True)
     with isolated_database() as db:
@@ -317,6 +315,56 @@ def test_publication_idempotency_unique_constraint(isolated_database, monkeypatc
         assert len(list(db.scalars(select(Publication)))) == 1
         db.add(Publication(clip_id=clip_id,platform='youtube'))
         with pytest.raises(IntegrityError): db.commit()
+
+
+def test_rerun_refused_when_clip_has_publication(isolated_database, tmp_path, monkeypatch):
+    from app.models import RightsRecord, Source
+    media_root = tmp_path / 'media'
+    media_root.mkdir()
+    source_media = media_root / 'source.mp4'
+    source_media.write_bytes(b'video')
+    monkeypatch.setattr(main.settings, 'media_root', str(media_root))
+    monkeypatch.setattr(worker.settings, 'media_root', str(media_root))
+    with isolated_database() as db:
+        source = Source(platform='upload', external_id='rerun-source', title='test', url='https://example.com', media_path=str(source_media))
+        db.add(source)
+        db.flush()
+        db.add(RightsRecord(source_id=source.id, authorization_type='owned', commercial_use=True,
+                            publishing_allowed=True, allowed_platforms=['youtube'], evidence='Owned test evidence'))
+        clip = Clip(source_id=source.id, start_seconds=0, end_seconds=1, description='clip',
+                    hook='hook', score=1, status='rendered')
+        db.add(clip)
+        db.flush()
+        db.add(Publication(clip_id=clip.id, platform='youtube', status='succeeded'))
+        db.commit()
+        source_id = source.id
+    with TestClient(main.app) as client:
+        response = client.post(f'/api/v1/sources/{source_id}/process')
+        assert response.status_code == 409
+        assert 'publications reference' in response.text
+
+
+def test_cleanup_only_removes_unreferenced_output_folders(isolated_database, tmp_path, monkeypatch):
+    from app.models import Source
+    root = tmp_path / 'media'
+    monkeypatch.setattr(main.settings, 'media_root', str(root))
+    monkeypatch.setattr(worker.settings, 'media_root', str(root))
+    with isolated_database() as db:
+        source = Source(platform='upload', external_id='cleanup-source', title='test', url='https://example.com')
+        db.add(source)
+        db.flush()
+        source_id = source.id
+        clip = Clip(source_id=source_id, start_seconds=0, end_seconds=1, description='clip',
+                    hook='hook', score=1, status='rendered')
+        db.add(clip)
+        db.commit()
+    source_root = root / 'clips' / f'source-{source_id}'
+    old = source_root / 'run-old'
+    keep = source_root / 'run-7'
+    old.mkdir(parents=True)
+    keep.mkdir(parents=True)
+    assert worker.cleanup_unreferenced_output_folders(source_id, 7) == 1
+    assert not old.exists() and keep.exists()
 
 
 def test_upload_db_failure_removes_partial_file(monkeypatch, isolated_database):
@@ -345,7 +393,7 @@ def test_idle_session_pruning(isolated_database, monkeypatch):
 async def test_ready_requires_configured_redis(isolated_database, monkeypatch):
     with isolated_database() as db:
         db.execute(text('CREATE TABLE alembic_version (version_num VARCHAR(32))'))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0005_security')")); db.commit()
+        db.execute(text("INSERT INTO alembic_version VALUES ('0007_schema_hardening')")); db.commit()
     async def unavailable(url): return False
     monkeypatch.setattr(main,'redis_ready',unavailable)
     monkeypatch.setattr(main.settings,'redis_url','redis://stub')
@@ -386,6 +434,8 @@ def test_migration_publication_dedup_preserves_metrics(tmp_path, monkeypatch):
     command.upgrade(config,'0004_jobs')
     engine = create_engine(url)
     with engine.begin() as db:
+        db.execute(text("INSERT INTO sources (id,platform,external_id,title,url,status,created_at) VALUES (1,'upload','source','Source','https://example.com','analyzed',CURRENT_TIMESTAMP)"))
+        db.execute(text("INSERT INTO clips (id,source_id,start_seconds,end_seconds,description,hook,score,status,evidence,created_at) VALUES (1,1,0,1,'clip','hook',1,'rendered','{}',CURRENT_TIMESTAMP)"))
         for publication_id in (1,2):
             db.execute(text("INSERT INTO publications (id,clip_id,platform,status,created_at) VALUES (:id,1,'youtube','queued',CURRENT_TIMESTAMP)"), {'id':publication_id})
         db.execute(text("INSERT INTO metric_events (publication_id,metric,value,verified,observed_at) VALUES (2,'views',10,1,CURRENT_TIMESTAMP)"))
@@ -398,6 +448,7 @@ def test_migration_publication_dedup_preserves_metrics(tmp_path, monkeypatch):
 
 def test_login_backoff_survives_username_flooding(monkeypatch):
     import time as _time
+
     from app import main as _main
     from app.config import settings as _settings
 

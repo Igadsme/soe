@@ -25,6 +25,7 @@ from .models import Job
 REQUESTS = Counter("soe_http_requests_total", "HTTP requests", ["method", "route", "status"])
 LATENCY = Histogram("soe_http_request_duration_seconds", "HTTP request latency", ["method", "route", "status"])
 IN_PROGRESS = Gauge("soe_http_requests_in_progress", "Active HTTP requests", multiprocess_mode="livesum")
+JOB_DEADLINE_EXCEEDED = Counter("soe_job_deadline_exceeded_total", "Jobs stopped after exceeding the processing deadline")
 
 
 def scrub_event(event, hint=None):
