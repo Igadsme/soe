@@ -49,8 +49,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --prefix frontend
       - run: npm audit --omit=dev --prefix frontend
-      - run: npm run lint --prefix frontend
-      - run: npx --prefix frontend vitest run
+      - run: npm run typecheck --prefix frontend
+      - run: npm test --prefix frontend
       - run: npm run build --prefix frontend
   containers:
     runs-on: ubuntu-latest
