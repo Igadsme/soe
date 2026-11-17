@@ -4,15 +4,29 @@
 
 ## Done
 
-- [x] Every application endpoint except login, `/health`, and `/ready` requires a session. Interactive API docs/OpenAPI routes are disabled. Development bypass requires development + demo mode + no password or hash; demo pipeline is development-only.
+- [x] Every application endpoint except login, `/health`, and `/ready` requires a session. Interactive API docs/OpenAPI routes are disabled. Development bypass requires explicit SOE_DEV_AUTH_BYPASS=true + development + loopback client + no password or hash; demo pipeline is development-only.
 - [x] HMAC sessions contain random IDs backed by `auth_sessions` (new migration `0003_auth_sessions`). Logout revokes server-side; expiry and revocation are checked on every request. Previous stateless tokens are invalidated by the format change.
-- [x] HttpOnly session cookies, Secure in production, SameSite=lax, Path=/; logout clears matching attributes. `/api/v1/auth/me` reports the current operator.
-- [x] All cookie-auth mutations except login require matching `soe_csrf` cookie and `X-CSRF-Token`. Frontend requests include credentials and the CSRF header; sign-in/out controls are available.
-- [x] Shared atomic Redis rate limits (60-second fixed windows, required in production), with bounded in-memory development fallback; login has a 5/minute IP+username limit and a 20/minute IP limit. Forwarded IPs require an explicitly trusted peer CIDR. Server-level forwarded rewriting is disabled in the production entrypoint.
+- [x] HttpOnly session cookies, Secure in production/staging, SameSite=lax, Path=/; logout clears matching attributes. `/api/v1/auth/me` reports the current operator.
+- [x] All cookie-auth mutations except login require session-bound HMAC in the `soe_csrf` cookie and `X-CSRF-Token`. Frontend requests include credentials and the CSRF header; sign-in/out controls are available.
+- [x] Shared atomic Redis rate limits (60-second fixed windows, required in production), with bounded in-memory development fallback; login has a 5/minute username limit with exponential backoff independent of IP and a 20/minute IP limit. Forwarded IPs require an explicitly trusted peer CIDR. Server-level forwarded rewriting is disabled in the production entrypoint.
 - [x] Media paths resolve inside `SOE_MEDIA_ROOT`, including a check at processing time; title/query/platform/ID validation; randomized upload names, MIME/signature checks and size limit. Signature checks are basic, not a full malware/media sandbox.
 - [x] Security headers including production HSTS; explicit credentialed CORS allowlist. Generic failures with request IDs, JSON access logging without query strings/cookies; HTTP-client URL logging disabled. Secret settings use `SecretStr`.
-- [x] Liveness does not touch the DB. Readiness checks DB connectivity and Alembic head. SQLAlchemy uses **synchronous** sessions.
+- [x] Liveness does not touch the DB. Readiness checks DB connectivity, Alembic head, and configured Redis. SQLAlchemy uses **synchronous** sessions.
 - [x] Backup/restore scripts and [runbook](BACKUP_RESTORE.md); Ruff, coverage tooling, dependency audits, exact frontend dependency versions, TypeScript checks, and a proposed [CI workflow](infra/ci/ci.yml). Existing `.github/workflows` were not modified.
+
+- [x] DB-backed asynchronous source processing and job polling; fenced, renewable worker leases and retries; hourly session cleanup. Source responses hide absolute media paths. Redis uses redis.asyncio, a 200ms deadline and a three-failure/10-second circuit breaker (general requests fail open, login fails closed). Tests isolate dotenv and database settings and enforce 85% backend coverage.
+
+- [x] Sentinel: synchronous DB routes execute in the threadpool; worker claim sweeps expired leases into retry/failed and updates workflow state. Active-source partial unique index and SKIP LOCKED claims prevent duplicate work. Clip writes replace prior source clips atomically on success; failed/stale attempts remove their rendered files. Paths include source, workflow run, and lease owner.
+- [x] Pure ASGI body guard authenticates uploads and validates CSRF before reading any bytes; checks declared and streamed size. Other mutation bodies are capped at 64 KiB. Upload extensions and MP4/MOV brands or WebM DocType are checked; all failed uploads remove partial files.
+- [x] Rights require 20 non-whitespace evidence characters and explicit known publication platforms; empty scope denies ingestion/publication. Owned rights require uploads. Naive expiry is normalized to UTC. Duplicate external IDs return 409; provider failures return generic 502/503.
+- [x] FFmpeg/ffprobe have subprocess timeouts; ingest caps media size and duration. Whisper accepts the media file path instead of an in-memory PCM waveform; model cache uses a configurable shared named volume.
+- [x] Production/staging reject plaintext admin passwords and publishing enabled. Unknown environments are rejected; defaults are production and demo off. Development Compose provides explicit development-only login credentials (`operator` / `development-only-password`); bypass remains loopback-only.
+- [x] Migration 0005 adds publication uniqueness and session fingerprint/idle metadata; it invalidates existing sessions and collapses duplicate publication rows to the oldest ID while preserving metric references. Publish requests return the existing (clip, platform) publication.
+- [x] Logout-all, credential fingerprint checks, 30-minute idle timeout with 60-second last-seen write throttle, idle session pruning, session-bound CSRF, PBKDF2 600,000 iterations with stored count, and shared full-hour SRT formatting are implemented.
+
+Legacy `salt$hash` passwords still verify at their original 200,000 iterations and log a warning. Environment-provided hashes cannot be transparently rewritten: regenerate `SOE_ADMIN_PASSWORD_HASH` with the command below to get `pbkdf2_sha256$600000$salt$hash`, deploy it to every replica, and restart. Credential changes invalidate all sessions on the updated replicas.
+
+Publishing remains blocked: **publishing.py's YouTube upload sends metadata only, with no media upload**; **the Instagram adapter puts the access token in the query string**. Implement resumable media upload and move Instagram authentication to a safe authorization header before enabling either adapter. Production/staging refuse the feature flag until that implementation is reviewed.
 
 ## Remaining (owner actions)
 
@@ -61,18 +75,18 @@
 1. Choose managed PostgreSQL with TLS, private networking, least-privilege credentials, automated backups and point-in-time recovery. Set `SOE_DATABASE_URL` to the psycopg connection URL; URL-encode password characters. The bundled `db` service is a single-host alternative, not managed HA.
 2. Set recovery point/time objectives and backup retention; schedule and monitor backups, encrypt them, copy off-site, restrict deletion access, and perform restore drills using [BACKUP_RESTORE.md](BACKUP_RESTORE.md). The scripts target the Compose `db`; use provider-native tooling for a managed database.
 3. Provision private object storage with encryption, lifecycle/retention rules and restricted IAM. Implement an object-storage adapter plus signed downloads and ingestion into trusted local workspaces; the application currently uses a local/shared volume, not object storage. Back up media separately from PostgreSQL.
-4. Schedule deletion of expired/revoked `auth_sessions` according to an approved audit retention period. Signing keys, database credentials, and backup keys need rotation/recovery procedures.
+4. The worker deletes expired/revoked `auth_sessions` hourly after `SOE_SESSION_RETENTION_SECONDS` (default seven days). Approve the retention period and monitor worker health. Signing keys, database credentials, and backup keys need rotation/recovery procedures.
 
 ### 7. Secret management, scaling and monitoring
 
 1. Select a secret manager (cloud-native or Vault), restrict deployment identity access, inject values at runtime, and configure rotation. Do not put secrets in frontend variables, image layers or logs. Configure log collection to omit query strings and credentials at the proxy/hosting layer too.
 2. Monitor Redis availability: general rate limiting fails open with a sanitized warning; login fails closed with 503 “login temporarily unavailable” and Retry-After: 60. Keep all API replicas on the same Redis database (`SOE_REDIS_URL`). Redis restarts/data loss clear counters.
-3. Choose a durable queue, implement locking, retry/backoff, idempotency and dead-letter handling for media/publication jobs. The current sync processing endpoint and small worker are not a production queue.
+3. Source processing now uses durable DB jobs (migration `0004_jobs`), active-source deduplication, hashed idempotency keys, transactional claims, renewable leases, retry/backoff and terminal failed-job inspection. API requests enqueue and return 202; authenticated job endpoints support polling. Workers may scale against shared PostgreSQL/media storage. Validate capacity, monitor queue age/failures and define workspace retention. Publication execution remains incomplete.
 4. Configure centralized JSON log retention/search and request-ID correlation, service/database/queue metrics, uptime/readiness alerts, disk/upload capacity alerts, provider quota alerts and error tracking with secret/PII scrubbing. Current error logs intentionally omit raw exceptions; add sanitized diagnostics before operational use.
 5. Complete security review, adversarial media testing/sandboxing, abuse controls, rights/legal review, retention/deletion policy, browser E2E and disaster recovery/load drills. Single-operator auth does not provide tenant isolation or user roles.
 
 ### 8. Apply CI and resolve the second scaffold
 
 1. Review `infra/ci/ci.yml`, set repository protections and dependency-update ownership, and have a user/token with **workflow permission** copy it to `.github/workflows/ci.yml`. This task deliberately does not change workflow files. CI includes lint, coverage report, both audits, typecheck/build, a fresh SQLite migration, Compose config and production image builds using placeholders.
-2. Run `scripts/ci_checks.sh` in the configured Python environment locally. Choose a meaningful coverage threshold after measuring the current baseline; do not confuse test coverage with a launch approval.
+2. Run `scripts/ci_checks.sh` in the configured Python environment locally. The backend line coverage threshold is enforced at 85%; do not confuse test coverage with a launch approval.
 3. Decide the fate of `src/soe` and `tests/test_app.py`: they are a **separate unused FastAPI scaffold**, not the production `backend/app` application. Recommendation: remove them in an owner-approved cleanup, or move any useful behavior into `backend/app` and consolidate tests. They are intentionally unchanged in this phase and still included in verification.

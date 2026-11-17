@@ -1,10 +1,7 @@
 """Optional Faster-Whisper boundary. Installation is intentionally optional for the CPU-only base image."""
-import subprocess
 from pathlib import Path
 
-import numpy as np
-
-from .media import _binary
+from .config import settings
 from .pipeline import TranscriptSegment
 
 
@@ -18,11 +15,8 @@ class FasterWhisperTranscriber:
             from faster_whisper import WhisperModel
         except ImportError as exc:
             raise TranscriptionUnavailable("faster-whisper is not installed; enable the inference worker extra") from exc
-        self.model = WhisperModel(model_size, device="auto", compute_type="int8")
+        self.model = WhisperModel(model_size, device="auto", compute_type="int8", download_root=settings.whisper_cache_dir)
 
     def transcribe(self, media_path: Path) -> list[TranscriptSegment]:
-        # Passing a waveform avoids PyAV metadata_errors incompatibilities across wheels.
-        raw = subprocess.run([_binary("ffmpeg"), "-v", "error", "-i", str(media_path), "-f", "s16le", "-ac", "1", "-ar", "16000", "-"], capture_output=True, check=True).stdout  # noqa: S603 -- argv list, trusted executable, no shell.
-        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        segments, _ = self.model.transcribe(audio, word_timestamps=True)
+        segments, _ = self.model.transcribe(str(media_path), word_timestamps=True)
         return [TranscriptSegment(float(item.start), float(item.end), item.text.strip()) for item in segments if item.text.strip()]

@@ -1,10 +1,11 @@
+import asyncio
 import hmac
 import logging
 import re
-import secrets
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from hashlib import sha256
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Literal
@@ -26,10 +27,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from redis.exceptions import RedisError
 from sqlalchemy import func, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from .auth import (
+    csrf_token,
     development_bypass,
     make_session,
     require_auth,
@@ -45,9 +48,9 @@ from .integrations import (
     YouTubeDataProvider,
 )
 from .logging_config import configure_logging
-from .media import ingest_authorized, render_vertical
 from .models import (
     Clip,
+    Job,
     LedgerEntry,
     MetricEvent,
     Publication,
@@ -55,11 +58,9 @@ from .models import (
     Source,
     WorkflowRun,
 )
-from .pipeline import extract_candidates
-from .rate_limit import redis_limited
+from .rate_limit import async_redis_limited, redis_ready
 from .rights import can_ingest_and_publish, can_publish_to
 from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_media_path
-from .transcription import FasterWhisperTranscriber, TranscriptionUnavailable
 
 
 @asynccontextmanager
@@ -70,34 +71,43 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID"], expose_headers=["X-Request-ID"])
+app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"], expose_headers=["X-Request-ID"])
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
+_login_backoffs: dict[str, tuple[int, float]] = {}
+_LOGIN_BACKOFF_MAX = 10000
+
+
+def _prune_login_backoffs(protect: str) -> None:
+    """Bound backoff memory without letting username flooding reset the admin backoff."""
+    if len(_login_backoffs) < _LOGIN_BACKOFF_MAX:
+        return
+    now = time.monotonic()
+    for key in [k for k, (_, until) in _login_backoffs.items() if until <= now and k != protect]:
+        del _login_backoffs[key]
+    while len(_login_backoffs) >= _LOGIN_BACKOFF_MAX:
+        victim = min((k for k in _login_backoffs if k != protect), key=lambda k: _login_backoffs[k][1], default=None)
+        if victim is None:
+            break
+        del _login_backoffs[victim]
 
 
 def client_ip(request: Request) -> str:
     peer = request.client.host if request.client else "unknown"
     try:
-        trusted = any(ip_address(peer) in ip_network(network.strip()) for network in settings.trusted_proxies.split(",") if network.strip())
-        if trusted and request.headers.get("X-Forwarded-For"):
-            return str(ip_address(request.headers["X-Forwarded-For"].split(",")[0].strip()))
+        networks = [ip_network(n.strip()) for n in settings.trusted_proxies.split(",") if n.strip()]
+        hops = [h.strip() for h in request.headers.get("X-Forwarded-For", "").split(",") if h.strip()] + [peer]
+        for hop in reversed(hops):
+            address = ip_address(hop)
+            if not any(address in network for network in networks):
+                return str(address)
     except ValueError:
         pass
     return peer
 
 
 def limited(windows, key: str, limit: int) -> bool:
-    if settings.redis_url.strip():
-        scope = "login" if windows is _login_windows else "general"
-        try:
-            return redis_limited(settings.redis_url, scope, key, limit)
-        except (RedisError, ValueError):
-            # Neither the URL nor exception text is safe to log.
-            logging.getLogger("soe.rate_limit").warning("Redis rate limiter unavailable", extra={"scope": scope})
-            if scope == "login":
-                raise HTTPException(503, "login temporarily unavailable", headers={"Retry-After": "60"}) from None
-            return False
     now = time.monotonic()
     for old in list(windows):
         if not windows[old] or now - windows[old][-1] >= 60:
@@ -112,6 +122,20 @@ def limited(windows, key: str, limit: int) -> bool:
         return True
     window.append(now)
     return False
+
+
+async def request_limited(windows, key: str, limit: int) -> bool:
+    if settings.redis_url.strip():
+        scope = "login" if windows is _login_windows else "general"
+        try:
+            return await async_redis_limited(settings.redis_url, scope, key, limit)
+        except (RedisError, ValueError):
+            logging.getLogger("soe.rate_limit").warning("Redis rate limiter unavailable", extra={"scope": scope})
+            if scope == "login":
+                raise HTTPException(503, "login temporarily unavailable", headers={"Retry-After": "60"}) from None
+            return False
+    # Keep local window mutations serialized on the event loop.
+    return limited(windows, key, limit)
 
 
 @app.exception_handler(Exception)
@@ -135,7 +159,7 @@ async def security_middleware(request: Request, call_next):
     request_id = supplied if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", supplied) else uuid4().hex
     request.state.request_id = request_id
     try:
-        if limited(_rate_windows, client_ip(request), settings.rate_limit_per_minute):
+        if await request_limited(_rate_windows, client_ip(request), settings.rate_limit_per_minute):
             response = JSONResponse({"detail": "rate limit exceeded"}, status_code=429, headers={"Retry-After": "60"})
         else:
             response = await call_next(request)
@@ -150,7 +174,7 @@ async def security_middleware(request: Request, call_next):
         "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
         "Cross-Origin-Opener-Policy": "same-origin",
     })
-    if settings.env == "production":
+    if settings.env in {"production", "staging"}:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     logging.getLogger("soe.access").info("request", extra={"request_id": request_id, "method": request.method, "path": request.url.path, "status": response.status_code, "duration_ms": round((time.monotonic() - started) * 1000, 2)})
     return response
@@ -161,13 +185,16 @@ async def health() -> dict:
     return {"status": "ok", "service": "soe-api"}
 
 
-@app.get("/ready")
-async def ready(db: Session = Depends(session)) -> dict:
+def database_ready(db: Session) -> dict:
     try:
         db.execute(text("SELECT 1"))
         from alembic.config import Config
         from alembic.script import ScriptDirectory
-        heads = set(ScriptDirectory.from_config(Config("alembic.ini")).get_heads())
+        package_parent = Path(__file__).resolve().parents[1]
+        root = package_parent if (package_parent / "backend" / "alembic").is_dir() else package_parent.parent
+        config = Config(str(root / "alembic.ini"))
+        config.set_main_option("script_location", str(root / "backend" / "alembic"))
+        heads = set(ScriptDirectory.from_config(config).get_heads())
         current = set(db.execute(text("SELECT version_num FROM alembic_version")).scalars())
         if current != heads:
             raise HTTPException(503, "database migrations are pending")
@@ -176,41 +203,57 @@ async def ready(db: Session = Depends(session)) -> dict:
     return {"status": "ready", "service": "soe-api"}
 
 
+@app.get("/ready")
+async def ready(db: Session = Depends(session)) -> dict:
+    result = await run_in_threadpool(database_ready, db)
+    if settings.redis_url and not await redis_ready(settings.redis_url):
+        raise HTTPException(503, "redis unavailable")
+    return result
+
+
 @app.post("/api/v1/auth/login")
 async def login(request: Request, username: str = Form(..., max_length=255), password: str = Form(..., max_length=1024)) -> JSONResponse:
-    key = client_ip(request) + ":" + username.casefold()
-    if limited(_login_windows, key, 5) or limited(_login_windows, "ip:" + client_ip(request), 20):
+    key = "user:" + username.casefold()
+    failures, blocked_until = _login_backoffs.get(key, (0, 0))
+    if time.monotonic() < blocked_until:
+        raise HTTPException(429, "login temporarily unavailable", headers={"Retry-After": str(max(1, int(blocked_until - time.monotonic())))})
+    if await request_limited(_login_windows, key, 5) or await request_limited(_login_windows, "ip:" + client_ip(request), 20):
         raise HTTPException(429, "login temporarily unavailable", headers={"Retry-After": "60"})
     if not settings.admin_password_hash and not settings.admin_password:
-        if settings.demo_mode and settings.env == "development":
+        if development_bypass(request):
             return JSONResponse({"authenticated": True, "mode": "development-bypass"})
         raise HTTPException(503, "authentication is not configured")
-    password_ok = verify_password(password, secret_value(settings.admin_password_hash)) if settings.admin_password_hash else settings.env == "development" and hmac.compare_digest(password.encode(), secret_value(settings.admin_password).encode())
+    password_ok = await run_in_threadpool(verify_password, password, secret_value(settings.admin_password_hash)) if settings.admin_password_hash else settings.env == "development" and hmac.compare_digest(password.encode(), secret_value(settings.admin_password).encode())
     if not hmac.compare_digest(username.encode(), settings.admin_username.encode()) or not password_ok:
+        _prune_login_backoffs(protect="user:" + settings.admin_username.casefold())
+        failures += 1
+        _login_backoffs[key] = (failures, time.monotonic() + (min(3600, 2 ** min(failures - 4, 12)) if failures >= 5 else 0))
         raise HTTPException(401, "invalid credentials")
+    _login_backoffs.pop(key, None)
     response = JSONResponse({"authenticated": True, "username": username})
-    response.set_cookie("soe_session", make_session(username), httponly=True, secure=settings.env == "production", samesite="lax", max_age=settings.session_ttl_seconds)
-    response.set_cookie("soe_csrf", secrets.token_urlsafe(32), httponly=False, secure=settings.env == "production", samesite="lax", path="/", max_age=settings.session_ttl_seconds)
+    token = await run_in_threadpool(make_session, username)
+    response.set_cookie("soe_session", token, httponly=True, secure=settings.env in {"production", "staging"}, samesite="lax", max_age=settings.session_ttl_seconds)
+    response.set_cookie("soe_csrf", csrf_token(token), httponly=False, secure=settings.env in {"production", "staging"}, samesite="lax", path="/", max_age=settings.session_ttl_seconds)
     return response
 
 
 @app.get("/api/v1/auth/me")
-async def current_user(username: str = Depends(require_auth)) -> dict:
+def current_user(username: str = Depends(require_auth)) -> dict:
     return {"username": username}
 
 
 @app.post("/api/v1/auth/logout")
-async def logout(request: Request, _: str = Depends(require_auth)) -> JSONResponse:
+def logout(request: Request, _: str = Depends(require_auth)) -> JSONResponse:
     response = JSONResponse({"authenticated": False})
-    if not development_bypass():
+    if not development_bypass(request):
         revoke_session(request.cookies["soe_session"])
     for name in ("soe_session", "soe_csrf"):
-        response.delete_cookie(name, path="/", secure=settings.env == "production", httponly=name == "soe_session", samesite="lax")
+        response.delete_cookie(name, path="/", secure=settings.env in {"production", "staging"}, httponly=name == "soe_session", samesite="lax")
     return response
 
 
 @app.get("/api/v1/overview")
-async def overview(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def overview(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     counts = {}
     for label, model in (("sources", Source), ("clips", Clip), ("workflows", WorkflowRun)):
         counts[label] = db.scalar(select(func.count()).select_from(model)) or 0
@@ -220,51 +263,63 @@ async def overview(db: Session = Depends(session), _: str = Depends(require_auth
 
 
 @app.post("/api/v1/sources/upload")
-async def upload_source(file: UploadFile = File(...), title: str = Form(..., min_length=1, max_length=500), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
-    if file.content_type not in {"video/mp4", "video/quicktime", "video/webm"}:
-        raise HTTPException(415, "only MP4, QuickTime, or WebM uploads are accepted")
+def upload_source(file: UploadFile = File(...), title: str = Form(..., min_length=1, max_length=500), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    extensions = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}
+    if file.content_type not in extensions:
+        raise HTTPException(415, "unsupported media type")
     media_root = Path(settings.media_root).resolve()
     media_root.mkdir(parents=True, exist_ok=True)
-    destination = media_root / f"upload-{uuid4().hex}.mp4"
-    prefix = await file.read(32)
-    is_mp4 = len(prefix) >= 12 and prefix[4:8] == b"ftyp"
-    is_webm = prefix.startswith(b"\x1a\x45\xdf\xa3")
-    if not ((file.content_type in {"video/mp4", "video/quicktime"} and is_mp4) or (file.content_type == "video/webm" and is_webm)):
-        raise HTTPException(415, "invalid media signature")
-    await file.seek(0)
-    size = 0
-    with destination.open("wb") as output:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            if size > settings.max_upload_bytes:
-                destination.unlink(missing_ok=True)
-                raise HTTPException(413, "upload exceeds configured size limit")
-            output.write(chunk)
-    source = Source(platform="upload", external_id=destination.stem, title=title, url="https://local.soe/upload", media_path=str(destination), status="rights_review")
-    db.add(source)
-    db.commit()
-    return {"source_id": source.id, "status": source.status, "bytes": size, "filename": destination.name}
+    destination = media_root / f"upload-{uuid4().hex}{extensions[file.content_type]}"
+    success = False
+    try:
+        prefix = file.file.read(4096)
+        brands = {b"isom", b"iso2", b"mp41", b"mp42", b"avc1", b"qt  ", b"M4V ", b"dash"}
+        valid = (len(prefix) >= 12 and prefix[4:8] == b"ftyp" and prefix[8:12] in brands) if file.content_type != "video/webm" else prefix.startswith(b"\x1a\x45\xdf\xa3") and b"\x42\x82\x84webm" in prefix
+        if not valid:
+            raise HTTPException(415, "invalid media signature")
+        file.file.seek(0)
+        size = 0
+        with destination.open("wb") as output:
+            while chunk := file.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.max_upload_bytes:
+                    raise HTTPException(413, "upload exceeds configured size limit")
+                output.write(chunk)
+        source = Source(platform="upload", external_id=destination.stem, title=title, url="https://local.soe/upload", media_path=str(destination), status="rights_review")
+        db.add(source)
+        db.commit()
+        success = True
+        return {"source_id": source.id, "status": source.status, "bytes": size, "filename": destination.name}
+    finally:
+        if not success:
+            destination.unlink(missing_ok=True)
 
 
 @app.post("/api/v1/sources", response_model=SourceRead, status_code=201)
-async def create_source(payload: SourceCreate, db: Session = Depends(session), _: str = Depends(require_auth)) -> Source:
+def create_source(payload: SourceCreate, db: Session = Depends(session), _: str = Depends(require_auth)) -> Source:
     source = Source(platform=payload.platform, external_id=payload.external_id, title=payload.title, url=str(payload.url), media_path=payload.media_path)
     db.add(source)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "source external_id already exists") from None
     db.refresh(source)
     return source
 
 
 @app.get("/api/v1/sources", response_model=list[SourceRead])
-async def list_sources(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[Source]:
+def list_sources(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[Source]:
     return list(db.scalars(select(Source).order_by(Source.created_at.desc())).all())
 
 
 @app.post("/api/v1/sources/{source_id}/rights", status_code=201)
-async def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(404, "source not found")
+    if payload.authorization_type == "owned" and source.platform != "upload":
+        raise HTTPException(422, "owned authorization requires an upload source")
     record = RightsRecord(source_id=source_id, **payload.model_dump())
     db.add(record)
     source.status = "authorized" if can_ingest_and_publish(record) else "rights_review"
@@ -272,8 +327,8 @@ async def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, 
     return {"source_id": source_id, "status": source.status, "can_publish": can_ingest_and_publish(record)}
 
 
-@app.post("/api/v1/sources/{source_id}/process")
-async def process_source(source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+@app.post("/api/v1/sources/{source_id}/process", status_code=202)
+def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     source = db.get(Source, source_id)
     rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == source_id).order_by(RightsRecord.created_at.desc()))
     if not source or not rights:
@@ -287,46 +342,57 @@ async def process_source(source_id: int = PathParam(gt=0, le=2147483647), db: Se
         raise HTTPException(422, "invalid media path") from exc
     if not source.media_path or not Path(source.media_path).is_file():
         raise HTTPException(422, "source has no local authorized media path")
-    run = WorkflowRun(source_id=source.id, state="transcribing")
-    db.add(run)
-    db.commit()
+    raw_key = request.headers.get("Idempotency-Key")
+    if raw_key is not None and not 1 <= len(raw_key) <= 255:
+        raise HTTPException(422, "invalid idempotency key")
+    key = sha256(raw_key.encode()).hexdigest() if raw_key else None
+    existing = db.scalar(select(Job).where(Job.idempotency_key == key)) if key else None
+    if existing and existing.source_id != source_id:
+        raise HTTPException(409, "idempotency key already used")
+    existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+    if existing:
+        return JSONResponse({"job_id": existing.id, "status": existing.status}, status_code=200)
+    run = WorkflowRun(source_id=source_id, state="queued")
     try:
-        ingested, digest, metadata = ingest_authorized(source.media_path, Path(settings.media_root) / "ingested" / f"{source.id}-{Path(source.media_path).name}")
-        source.media_sha256 = digest
-        segments = FasterWhisperTranscriber(settings.whisper_model_size).transcribe(ingested)
-        candidates = extract_candidates(segments, limit=5)
-        for index, candidate in enumerate(candidates, 1):
-            clip_dir = Path(settings.media_root) / "clips"
-            subtitle = clip_dir / f"source-{source.id}-clip-{index}.srt"
-            output = clip_dir / f"source-{source.id}-clip-{index}.mp4"
-            subtitle.parent.mkdir(parents=True, exist_ok=True)
-            duration = max(1, int(candidate.end - candidate.start))
-            subtitle.write_text(f"1\n00:00:00,000 --> 00:00:{duration:02},000\n{candidate.description}\n", encoding="utf-8")
-            render_vertical(ingested, output, candidate.start, candidate.end, subtitle)
-            db.add(Clip(source_id=source.id, start_seconds=candidate.start, end_seconds=candidate.end, description=candidate.description, hook=candidate.hook, score=candidate.score, status="rendered", evidence=candidate.evidence, output_path=str(output), subtitle_path=str(subtitle)))
-        run.state = "edited"
-        source.status = "analyzed"
+        db.add(run)
+        db.flush()
+        job = Job(id=uuid4().hex, source_id=source_id, workflow_id=run.id, idempotency_key=key)
+        db.add(job)
         db.commit()
-        return {"workflow_id": run.id, "source_id": source.id, "state": run.state, "probe": metadata, "transcript_segments": len(segments), "clips_generated": len(candidates)}
-    except TranscriptionUnavailable as exc:
-        run.state = "failed"
-        run.error = str(exc)
-        db.commit()
-        raise HTTPException(503, "service temporarily unavailable") from exc
-    except Exception as exc:
-        run.state = "failed"
-        run.error = str(exc)
-        db.commit()
-        raise HTTPException(500, "processing failed") from exc
+    except IntegrityError:
+        db.rollback()
+        job = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+        if not job and key:
+            job = db.scalar(select(Job).where(Job.idempotency_key == key))
+        if not job or job.source_id != source_id:
+            raise HTTPException(409, "idempotency conflict") from None
+    return {"job_id": job.id, "status": job.status}
+
+
+def job_read(job: Job) -> dict:
+    return {name: getattr(job, name) for name in ("id", "kind", "source_id", "status", "attempts", "max_attempts", "run_after", "last_error", "result", "created_at", "updated_at")}
+
+
+@app.get("/api/v1/jobs")
+def list_jobs(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
+    return [job_read(job) for job in db.scalars(select(Job).order_by(Job.created_at.desc()).limit(100))]
+
+
+@app.get("/api/v1/jobs/{job_id}")
+def get_job(job_id: str, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    return job_read(job)
 
 
 @app.get("/api/v1/clips", response_model=list[ClipRead])
-async def list_clips(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[Clip]:
+def list_clips(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[Clip]:
     return list(db.scalars(select(Clip).order_by(Clip.score.desc())).all())
 
 
 @app.get("/api/v1/clips/{clip_id}/download")
-async def download_clip(clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
+def download_clip(clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
     clip = db.get(Clip, clip_id)
     if not clip or not clip.output_path or not Path(clip.output_path).is_file():
         raise HTTPException(404, "rendered clip not found")
@@ -334,14 +400,14 @@ async def download_clip(clip_id: int = PathParam(gt=0, le=2147483647), db: Sessi
 
 
 @app.post("/api/v1/discovery/search")
-async def discover(platform: Literal["youtube", "twitch"], query: str = Query(min_length=1, max_length=200), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def discover(platform: Literal["youtube", "twitch"], query: str = Query(min_length=1, max_length=200), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     if platform not in {"youtube", "twitch"}:
         raise HTTPException(422, "platform must be youtube or twitch")
     provider = (FixtureProvider(platform) if settings.demo_mode else YouTubeDataProvider() if platform == "youtube" else TwitchHelixProvider())
     try:
-        items = await provider.search(query)
+        items = asyncio.run(provider.search(query))
     except ProviderUnavailable as exc:
-        raise HTTPException(503, "service temporarily unavailable") from exc
+        raise HTTPException(exc.status_code, "service temporarily unavailable") from exc
     created = 0
     for item in items:
         existing = db.scalar(select(Source).where(Source.external_id == item.external_id))
@@ -353,13 +419,13 @@ async def discover(platform: Literal["youtube", "twitch"], query: str = Query(mi
 
 
 @app.get("/api/v1/publications")
-async def publications(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
+def publications(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
     rows = list(db.scalars(select(Publication).order_by(Publication.created_at.desc())).all())
     return [{"id": row.id, "clip_id": row.clip_id, "platform": row.platform, "status": row.status, "external_id": row.external_id, "error": "publication failed" if row.error else None} for row in rows]
 
 
 @app.post("/api/v1/clips/{clip_id}/publish")
-async def queue_publication(platform: Literal["youtube", "twitch", "tiktok", "instagram"], clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def queue_publication(platform: Literal["youtube", "twitch", "tiktok", "instagram"], clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     if not settings.publishing_enabled:
         raise HTTPException(409, "publishing is disabled by SOE_PUBLISHING_ENABLED")
     clip = db.get(Clip, clip_id)
@@ -368,30 +434,37 @@ async def queue_publication(platform: Literal["youtube", "twitch", "tiktok", "in
     rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == clip.source_id).order_by(RightsRecord.created_at.desc()))
     if not rights or not can_publish_to(rights, platform):
         raise HTTPException(403, "current rights do not authorize publication to this platform")
+    publication = db.scalar(select(Publication).where(Publication.clip_id == clip_id, Publication.platform == platform))
+    if publication:
+        return {"publication_id": publication.id, "status": publication.status}
     publication = Publication(clip_id=clip_id, platform=platform, status="queued")
     db.add(publication)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        publication = db.scalar(select(Publication).where(Publication.clip_id == clip_id, Publication.platform == platform))
     return {"publication_id": publication.id, "status": publication.status}
 
 
 @app.get("/api/v1/analytics")
-async def analytics(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def analytics(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     events = list(db.scalars(select(MetricEvent)).all())
     return {"verified": [{"metric": event.metric, "value": event.value, "publication_id": event.publication_id} for event in events if event.verified], "unverified": [{"metric": event.metric, "value": event.value, "publication_id": event.publication_id} for event in events if not event.verified]}
 
 
 @app.get("/api/v1/revenue")
-async def revenue(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def revenue(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     entries = list(db.scalars(select(LedgerEntry).order_by(LedgerEntry.created_at.desc())).all())
     return {"entries": [{"id": item.id, "kind": item.kind, "category": item.category, "cents": item.cents, "verified": item.verified, "note": item.note} for item in entries], "verified_only": True}
 
 
 @app.get("/api/v1/agents")
-async def agents(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
+def agents(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
     queued = db.scalar(select(func.count()).select_from(WorkflowRun).where(WorkflowRun.state == "queued")) or 0
     live_discovery = bool(settings.youtube_api_key or (settings.twitch_client_id and settings.twitch_client_secret))
     return [{"name": name, "status": ("ready" if ready else "blocked"), "detail": detail, "queued_workflows": queued} for name, ready, detail in [
-        ("discovery", live_discovery or settings.demo_mode, "official adapters configured" if live_discovery else "fixture mode only"),
+        ("discovery", live_discovery or settings.demo_mode, "official adapters configured" if live_discovery else "fixture mode (development)" if settings.demo_mode else "blocked: no provider credentials configured"),
         ("rights", True, "fail-closed policy active"),
         ("perception", True, f"Faster-Whisper {settings.whisper_model_size} boundary available"),
         ("highlights", True, "evidence-backed ranking active"),
@@ -403,12 +476,12 @@ async def agents(db: Session = Depends(session), _: str = Depends(require_auth))
 
 
 @app.get("/api/v1/settings")
-async def read_settings(_: str = Depends(require_auth)) -> dict:
+def read_settings(_: str = Depends(require_auth)) -> dict:
     return {"environment": settings.env, "demo_mode": settings.demo_mode, "whisper_model_size": settings.whisper_model_size, "publishing_enabled": settings.publishing_enabled, "max_upload_bytes": settings.max_upload_bytes, "max_clip_seconds": settings.max_clip_seconds, "configured_integrations": {"youtube": bool(settings.youtube_api_key), "twitch": bool(settings.twitch_client_id and settings.twitch_client_secret)}}
 
 
 @app.post("/api/v1/demo/pipeline")
-async def demo_pipeline(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def demo_pipeline(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     """Creates auditable local records only; no download, inference, or publishing is faked."""
     if settings.env != "development" or not settings.demo_mode:
         raise HTTPException(404, "not found")
@@ -421,3 +494,20 @@ async def demo_pipeline(db: Session = Depends(session), _: str = Depends(require
     db.add(run)
     db.commit()
     return {"workflow_id": run.id, "state": run.state, "note": "Fixture records only; connect authorized media and inference providers for real processing."}
+
+
+@app.post("/api/v1/auth/logout-all")
+def logout_all(request: Request, username: str = Depends(require_auth)) -> dict:
+    from sqlalchemy import update
+
+    from .auth import SessionLocal
+    from .models import AuthSession
+    with SessionLocal() as db:
+        db.execute(update(AuthSession).where(AuthSession.username == username).values(revoked_at=int(time.time())))
+        db.commit()
+    return {"authenticated": False}
+
+
+from .request_guard import RequestGuard  # noqa: E402
+
+app.add_middleware(RequestGuard)

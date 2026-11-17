@@ -11,10 +11,12 @@ x-api: &api
     SOE_SESSION_SECRET: ${SOE_SESSION_SECRET:?Set SOE_SESSION_SECRET}
     SOE_REDIS_URL: ${SOE_REDIS_URL:-redis://redis:6379/0}
     SOE_MEDIA_ROOT: /app/media
+    SOE_WHISPER_CACHE_DIR: /app/.cache/whisper
     SOE_RUN_MIGRATIONS: ${SOE_RUN_MIGRATIONS:-false}
     PORT: "8000"
   volumes:
     - soe-media:/app/media
+    - soe-whisper:/app/.cache/whisper
   restart: unless-stopped
   depends_on:
     db:
@@ -97,3 +99,4 @@ services:
 volumes:
   soe-db:
   soe-media:
+  soe-whisper:

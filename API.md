@@ -12,8 +12,40 @@
 - `GET /api/v1/publications` — list publication queue/history records.
 - `POST /api/v1/clips/{id}/publish?platform=...` — rights-gated queue operation; disabled unless `SOE_PUBLISHING_ENABLED=true`.
 - `GET /api/v1/analytics` — separate verified and unverified metric observations.
-- `POST /api/v1/auth/login` / `POST /api/v1/auth/logout` — signed HttpOnly session lifecycle; development mode is explicitly bypassed only when no admin password is configured.
+- `POST /api/v1/auth/login` / `POST /api/v1/auth/logout` — signed HttpOnly session lifecycle; development bypass requires explicit opt-in, a loopback peer, and no configured credentials.
 - `POST /api/v1/sources/upload` — validated local video upload, initially stored as `rights_review`.
-- `POST /api/v1/sources/{id}/process` — rights-gated real Faster-Whisper + FFmpeg processing and clip persistence.
+- `POST /api/v1/sources/{id}/process` — rights/path-gated enqueue. Returns `202 {"job_id": "...", "status": "queued"}`; no inference runs in the request.
 - `GET /api/v1/clips/{id}/download` — authenticated rendered MP4 download.
 - `GET /api/v1/revenue`, `GET /api/v1/agents`, `GET /api/v1/settings` — verified ledger entries, agent capability status, and safe non-secret runtime configuration.
+
+- `GET /api/v1/jobs/{id}` — authenticated status (`queued`, `running`, `succeeded`,
+  `failed`), attempts, run_after, sanitized last_error, result and timestamps;
+  returns 404 for an unknown ID.
+- `GET /api/v1/jobs` — authenticated latest 100 jobs, newest first.
+
+Process accepts an optional `Idempotency-Key` header (1–255 characters).
+Repeating a request while the source has a queued/running job returns the same job
+with HTTP 200. A supplied key also replays a completed job; using it for another
+source returns 409. Rights and local path checks still run before replay/enqueue
+(403/404/422). Poll the job endpoint until succeeded/failed, then refresh sources
+and clips. Success `result` contains workflow_id, source_id, probe,
+transcript_segments and clips_generated. Workers retry failures up to three
+attempts with exponential delays and reclaim expired leases. A WorkflowRun is
+created at enqueue and moves queued → transcribing → edited, or back to queued
+for retry / failed on exhaustion. Successful replay creates no duplicate clips.
+Source read responses expose `has_media`; they never expose `media_path`.
+
+## Sentinel hardening and durable jobs
+
+- `POST /api/v1/auth/logout-all`: authenticated, CSRF-protected; returns `200 {"authenticated": false}` and revokes every session for this operator. Existing session cookies subsequently return 401. Logout also revokes server-side. Sessions expire after 1,800 idle seconds by default; credential hash changes invalidate them. CSRF is bound to the session; send the `soe_csrf` cookie value as `X-CSRF-Token`.
+- `POST /api/v1/auth/login`: form body capped at 64 KiB before parsing. Returns 401 for invalid credentials, 429 with Retry-After for per-username exponential backoff/username or IP windows, 503 if authentication or required Redis is unavailable. Production/staging cookies are Secure.
+- `POST /api/v1/sources/upload`: cookie/session and CSRF checked before body reads (401/403). Declared or streamed bodies above SOE_MAX_UPLOAD_BYTES return 413. MP4/MOV require an ftyp box with a known brand; WebM requires EBML and WebM DocType. Invalid types/signatures return 415. Files use .mp4, .mov, or .webm according to validated MIME.
+- Other POST/PUT/PATCH/DELETE bodies are limited to 64 KiB, returning 413 before parsing on overflow.
+- `POST /api/v1/sources`: duplicate external_id returns 409.
+- `POST /api/v1/sources/{id}/rights`: owned requires an upload source; evidence requires at least 20 non-whitespace characters; allowed_platforms is a required non-empty list drawn from upload/youtube/twitch/tiktok/instagram. Invalid input returns 422. Naive expires_at is interpreted as UTC. Empty existing scopes deny processing and publishing.
+- `POST /api/v1/sources/{id}/process`: 202 with job_id/status for a new durable job; 200 for the same idempotency key or an existing active source job; 409 for a conflicting key. No media work runs in this request. Expired worker leases retry up to max_attempts then fail, including workflow state. Poll `GET /api/v1/jobs/{job_id}` or `GET /api/v1/jobs`.
+- `POST /api/v1/clips/{id}/publish?platform=...`: idempotent per clip/platform, returning the existing publication_id/status; 409 when publishing is disabled. Production/staging reject enabled publishing at startup while adapters remain incomplete.
+- Discovery provider 401/403, rate limits and timeouts return generic 503; malformed provider data returns generic 502.
+- `/ready`: 503 if DB, migration head, or configured Redis is unavailable; `/health` remains lightweight.
+
+Environment defaults are production/demo off. Staging has the same startup validation, HSTS and Secure cookie policy as production. Development bypass requires explicit opt-in, a loopback peer and no configured credentials.

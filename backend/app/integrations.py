@@ -1,5 +1,6 @@
 """Official metadata provider adapters. No adapter treats public visibility as reuse permission."""
 from dataclasses import dataclass
+from functools import wraps
 
 import httpx
 
@@ -16,10 +17,27 @@ class DiscoveredItem:
 
 
 class ProviderUnavailable(RuntimeError):
-    pass
+    status_code = 503
+
+
+class ProviderBadResponse(ProviderUnavailable):
+    status_code = 502
+
+
+def provider_errors(method):
+    @wraps(method)
+    async def wrapped(*args, **kwargs):
+        try:
+            return await method(*args, **kwargs)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProviderBadResponse("provider returned invalid data") from exc
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable("provider request failed") from exc
+    return wrapped
 
 
 class YouTubeDataProvider:
+    @provider_errors
     async def search(self, query: str, max_results: int = 10) -> list[DiscoveredItem]:
         if not settings.youtube_api_key:
             raise ProviderUnavailable("YOUTUBE_API_KEY is not configured")
@@ -32,6 +50,7 @@ class YouTubeDataProvider:
 
 
 class TwitchHelixProvider:
+    @provider_errors
     async def search(self, query: str, max_results: int = 10) -> list[DiscoveredItem]:
         if not settings.twitch_client_id or not settings.twitch_client_secret:
             raise ProviderUnavailable("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are not configured")
@@ -50,5 +69,6 @@ class FixtureProvider:
     def __init__(self, platform: str = "youtube"):
         self.platform = platform
 
+    @provider_errors
     async def search(self, query: str, max_results: int = 10) -> list[DiscoveredItem]:
         return [DiscoveredItem(self.platform, f"fixture-{query}-{i}", f"Fixture {query} #{i}", f"https://example.invalid/{self.platform}/{i}", {"fixture": True, "query": query}) for i in range(min(max_results, 3))]

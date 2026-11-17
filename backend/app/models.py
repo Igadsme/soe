@@ -1,6 +1,18 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -12,6 +24,11 @@ def now() -> datetime:
 
 class Source(Base):
     __tablename__ = "sources"
+
+    @property
+    def has_media(self) -> bool:
+        return bool(self.media_path)
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     platform: Mapped[str] = mapped_column(String(32))
     external_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
@@ -67,6 +84,7 @@ class WorkflowRun(Base):
 
 class Publication(Base):
     __tablename__ = "publications"
+    __table_args__ = (UniqueConstraint("clip_id", "platform", name="uq_publication_clip_platform"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     clip_id: Mapped[int] = mapped_column(Integer, index=True)
     platform: Mapped[str] = mapped_column(String(32))
@@ -103,4 +121,29 @@ class AuthSession(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     username: Mapped[str] = mapped_column(String(255))
     expires_at: Mapped[int] = mapped_column(Integer, index=True)
+    last_seen_at: Mapped[int] = mapped_column(Integer, default=lambda: int(__import__("time").time()))
+    password_fingerprint: Mapped[str] = mapped_column(String(64), default="")
     revoked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    __table_args__ = (Index("uq_jobs_active_source", "source_id", unique=True,
+                           sqlite_where=text("status IN ('queued', 'running')"),
+                           postgresql_where=text("status IN ('queued', 'running')")),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), default="process_source")
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"))
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflow_runs.id"))
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)

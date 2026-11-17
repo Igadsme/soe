@@ -9,11 +9,13 @@ from app import main, rate_limit
 
 
 class MemoryRedis:
+    async def aclose(self): pass
+
     def __init__(self):
         self.now = 0
         self.windows = {}
 
-    def eval(self, script, numkeys, key, limit):
+    async def eval(self, script, numkeys, key, limit):
         assert script == rate_limit._COUNTER
         assert numkeys == 1
         assert key.startswith("soe:rl:")
@@ -31,8 +33,8 @@ def shared_redis(monkeypatch):
     monkeypatch.setattr(main.settings, "admin_password", "test-only-password")
     monkeypatch.setattr(main.settings, "admin_password_hash", "")
     backend = MemoryRedis()
-    monkeypatch.setattr(rate_limit, "redis_client", lambda url: backend)
     monkeypatch.setattr(main.settings, "redis_url", "redis://redis:6379/0")
+    monkeypatch.setattr(rate_limit.AsyncRedis, "from_url", lambda *a, **k: backend)
     return backend
 
 
@@ -58,6 +60,7 @@ def test_sixth_login_is_limited_across_workers(shared_redis):
             assert response.status_code == (401 if index < 5 else 429)
         assert response.json()["detail"] == "login temporarily unavailable"
         shared_redis.now = 60
+        main._login_backoffs.clear()  # A different worker has no local backoff state.
         assert client.post("/api/v1/auth/login", data={"username": "operator", "password": "bad"}).status_code == 401
 
 
@@ -69,11 +72,12 @@ def test_login_ip_limit_across_usernames(shared_redis):
             assert response.status_code == (401 if index < 20 else 429)
 
 
-def test_scopes_and_keys_are_independent(shared_redis):
-    assert not rate_limit.redis_limited("", "general", "same", 1)
-    assert rate_limit.redis_limited("", "general", "same", 1)
-    assert not rate_limit.redis_limited("", "login", "same", 1)
-    assert not rate_limit.redis_limited("", "general", "other", 1)
+@pytest.mark.asyncio
+async def test_scopes_and_keys_are_independent(shared_redis):
+    assert not await rate_limit.async_redis_limited("", "general", "same", 1)
+    assert await rate_limit.async_redis_limited("", "general", "same", 1)
+    assert not await rate_limit.async_redis_limited("", "login", "same", 1)
+    assert not await rate_limit.async_redis_limited("", "general", "other", 1)
     assert all("same" not in key and "other" not in key for key in shared_redis.windows)
 
 
@@ -81,10 +85,10 @@ def test_redis_outage_policy_and_safe_warning(monkeypatch, caplog):
     monkeypatch.setattr(main, "configure_logging", lambda: None)
     monkeypatch.setattr(main.settings, "redis_url", "redis://private-test-value@redis/0")
 
-    def unavailable(url):
+    def unavailable(*args, **kwargs):
         raise ConnectionError("private-test-value")
 
-    monkeypatch.setattr(rate_limit, "redis_client", unavailable)
+    monkeypatch.setattr(rate_limit.AsyncRedis, "from_url", unavailable)
     with caplog.at_level(logging.WARNING, logger="soe.rate_limit"), TestClient(main.app) as client:
         assert client.get("/health").status_code == 200
         response = client.post("/api/v1/auth/login", data={"username": "operator", "password": "bad"})
@@ -102,7 +106,25 @@ def test_empty_url_uses_local_windows(monkeypatch):
     def unexpected(url):
         pytest.fail("Redis must not be used without a URL")
 
-    monkeypatch.setattr(rate_limit, "redis_client", unexpected)
+    monkeypatch.setattr(main, "async_redis_limited", unexpected)
     for _ in range(5):
         assert not main.limited(main._login_windows, "test", 5)
     assert main.limited(main._login_windows, "test", 5)
+
+
+@pytest.mark.asyncio
+async def test_redis_calls_run_off_event_loop(monkeypatch):
+    import threading
+    from httpx import ASGITransport, AsyncClient
+    loop_thread = threading.get_ident()
+    calls = []
+    async def limited(*args):
+        calls.append(threading.get_ident())
+        assert threading.get_ident() == loop_thread
+        return False
+    monkeypatch.setattr(main, 'async_redis_limited', limited)
+    monkeypatch.setattr(main.settings, 'redis_url', 'redis://test-only/0')
+    async with AsyncClient(transport=ASGITransport(app=main.app), base_url='http://test') as client:
+        assert (await client.get('/health')).status_code == 200
+        assert (await client.post('/api/v1/auth/login', data={'username':'operator','password':'test'})).status_code == 200
+    assert len(calls) == 4  # General requests plus both login limits.

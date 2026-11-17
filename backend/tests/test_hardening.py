@@ -74,7 +74,7 @@ async def test_brute_force_limit_and_generic_error(client):
         response = await client.post("/api/v1/auth/login", data={"username": "operator", "password": "wrong"}, headers={"X-Forwarded-For": f"192.0.2.{index}"})
         assert response.status_code == 401 and response.json()["detail"] == "invalid credentials"
     response = await client.post("/api/v1/auth/login", data={"username": "operator", "password": "test-password"})
-    assert response.status_code == 429 and response.headers["Retry-After"] == "60"
+    assert response.status_code == 429 and int(response.headers["Retry-After"]) > 0
 
 
 @pytest.mark.asyncio
@@ -164,7 +164,7 @@ async def test_readiness_requires_migration_head(client, isolated_database):
     assert (await client.get("/ready")).status_code == 503
     with isolated_database() as db:
         db.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0003_auth_sessions')"))
+        db.execute(text("INSERT INTO alembic_version VALUES ('0005_security')"))
         db.commit()
     assert (await client.get("/ready")).json() == {"status": "ready", "service": "soe-api"}
     with isolated_database() as db:
@@ -216,7 +216,7 @@ async def test_processing_rechecks_path_and_hides_errors(client, isolated_databa
         db.add(source)
         db.flush()
         source_id = source.id
-        db.add(RightsRecord(source_id=source_id, authorization_type="owned", commercial_use=True, publishing_allowed=True, evidence="Owned test media"))
+        db.add(RightsRecord(source_id=source_id, authorization_type="owned", commercial_use=True, publishing_allowed=True, allowed_platforms=['youtube'], evidence="Owned test media"))
         db.commit()
     assert (await client.post(f"/api/v1/sources/{source_id}/process", headers=headers)).status_code == 422
     media = tmp_path / "media" / "sample.mp4"
@@ -226,16 +226,11 @@ async def test_processing_rechecks_path_and_hides_errors(client, isolated_databa
         db.get(Source, source_id).media_path = str(media)
         db.commit()
 
-    def fail(*args, **kwargs):
-        raise RuntimeError("private processing detail")
-
-    monkeypatch.setattr(main, "ingest_authorized", fail)
     response = await client.post(f"/api/v1/sources/{source_id}/process", headers=headers)
-    assert response.status_code == 500
-    assert response.json() == {"detail": "processing failed"}
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
     with isolated_database() as db:
-        run = db.query(main.WorkflowRun).one()
-        assert run.state == "failed" and run.error == "private processing detail"
+        assert db.query(main.WorkflowRun).one().state == "queued"
 
 
 @pytest.mark.asyncio

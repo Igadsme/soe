@@ -9,8 +9,8 @@ def production_settings(**overrides):
         env="production",
         redis_url="redis://redis:6379/0",
         session_secret="test-placeholder-" * 3,
-        admin_password="test-only-password",
-        admin_password_hash="",
+        admin_password="",
+        admin_password_hash="test-hash",
         demo_mode=False,
         cors_origins="https://app.example.com",
         database_url="postgresql+psycopg://test:test@db/test",
@@ -61,3 +61,12 @@ def test_lifespan_validates_production(monkeypatch):
     with pytest.raises(RuntimeError, match="SOE_DEMO_MODE"):
         with TestClient(main.app):
             pass
+
+
+def test_tests_ignore_working_directory_dotenv(tmp_path, monkeypatch):
+    (tmp_path / '.env').write_text('SOE_ADMIN_PASSWORD=fixture-only-password\nSOE_DATABASE_URL=sqlite:///wrong-test-db.db\n')
+    monkeypatch.chdir(tmp_path)
+    config = Settings()
+    assert config.database_url == 'sqlite://'
+    assert not config.admin_password
+    assert not (tmp_path / 'wrong-test-db.db').exists()
