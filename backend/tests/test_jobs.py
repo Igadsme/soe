@@ -1,17 +1,16 @@
+import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-import asyncio
-import time
 
 import pytest
+from app import main, media, worker
+from app.media import MediaProbe
+from app.models import AuthSession, Clip, Job, RightsRecord, Source, WorkflowRun, now
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-
-from app import main, worker
-from app.models import AuthSession, Clip, Job, RightsRecord, Source, WorkflowRun, now
-from app.media import MediaProbe
 
 
 @pytest.fixture
@@ -265,6 +264,30 @@ async def test_process_once_renews_during_long_work(queued, monkeypatch):
     monkeypatch.setattr(worker, 'process_job', slow)
     assert await worker.process_once() == 1
     assert renewals
+
+
+@pytest.mark.asyncio
+async def test_processing_deadline_stops_renewal_and_requeues(queued, isolated_database, monkeypatch):
+    job_id = enqueue(queued)
+    monkeypatch.setattr(worker.settings, 'processing_deadline_floor_seconds', 0.01)
+    monkeypatch.setattr(worker.settings, 'processing_deadline_duration_multiplier', 1)
+    monkeypatch.setattr(worker, 'LEASE_SECONDS', 1)
+    monkeypatch.setattr(worker.Path, 'touch', lambda self: None)
+    monkeypatch.setattr(media, 'probe', lambda _: MediaProbe(0.001, 100, 100, True))
+    renewals = []
+    original_renew = worker.renew_lease
+    def renew(*args):
+        renewals.append(args)
+        original_renew(*args)
+    monkeypatch.setattr(worker, 'renew_lease', renew)
+    def hanging(*args): time.sleep(0.2)
+    monkeypatch.setattr(worker, 'process_job', hanging)
+    assert await worker.process_once() == 1
+    assert not renewals
+    with isolated_database() as db:
+        job = db.get(Job, job_id)
+        assert job.status == 'queued'
+        assert job.last_error == 'processing deadline exceeded'
 
 
 def test_idempotency_key_cannot_cross_sources(queued):

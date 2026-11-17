@@ -187,11 +187,11 @@ def test_media_timeout_and_duration_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(media, 'probe', lambda _: media.MediaProbe(3601,10,10,True))
     with pytest.raises(media.MediaProcessingError): media.ingest_authorized(str(source), tmp_path/'out.mp4')
     monkeypatch.setattr(media, '_binary', lambda _: '/stub/ffmpeg')
-    def timeout(*args, **kwargs):
-        assert kwargs['timeout'] == media.settings.ffmpeg_timeout_seconds
-        raise subprocess.TimeoutExpired('ffmpeg', kwargs['timeout'])
-    monkeypatch.setattr(media.subprocess, 'run', timeout)
-    with pytest.raises(subprocess.TimeoutExpired): media.render_vertical(source, tmp_path/'out.mp4',0,1)
+    def timeout(argv, timeout):
+        assert timeout == media.settings.ffmpeg_timeout_seconds
+        raise media.MediaProcessingError("media processing exceeded the configured deadline")
+    monkeypatch.setattr(media, 'run_media_command', timeout)
+    with pytest.raises(media.MediaProcessingError, match='deadline'): media.render_vertical(source, tmp_path/'out.mp4',0,1)
 
 
 def test_session_binding_idle_password_change_logout_all(isolated_database, monkeypatch):

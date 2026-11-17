@@ -14,7 +14,16 @@ from sqlalchemy import delete, or_, select, update
 from .config import settings
 from .db import SessionLocal
 from .media import ingest_authorized, render_vertical
-from .models import AuthSession, Clip, Job, RightsRecord, Source, WorkflowRun, now
+from .models import (
+    AuthSession,
+    Clip,
+    Job,
+    RightsRecord,
+    Source,
+    WorkflowRun,
+    now,
+)
+from .observability import JOB_DEADLINE_EXCEEDED
 from .pipeline import extract_candidates
 from .rights import can_ingest_and_publish
 from .schemas import safe_media_path
@@ -123,15 +132,15 @@ def process_job(job_id: str, worker_id: str) -> None:
         raise
 
 
-def fail_job(job_id: str, worker_id: str) -> None:
+def fail_job(job_id: str, worker_id: str, last_error: str = "media processing failed") -> None:
     with SessionLocal() as db:
         job = db.scalar(select(Job).where(owned(job_id, worker_id)))
         if not job:
             return
         failed = job.attempts >= job.max_attempts
-        result = db.execute(update(Job).execution_options(synchronize_session=False).where(owned(job_id, worker_id)).values(status="failed" if failed else "queued", run_after=now() + timedelta(seconds=2 ** job.attempts), last_error="media processing failed", locked_by=None, lease_expires_at=None))
+        result = db.execute(update(Job).execution_options(synchronize_session=False).where(owned(job_id, worker_id)).values(status="failed" if failed else "queued", run_after=now() + timedelta(seconds=2 ** job.attempts), last_error=last_error, locked_by=None, lease_expires_at=None))
         if result.rowcount:
-            db.execute(update(WorkflowRun).where(WorkflowRun.id == job.workflow_id).values(state="failed" if failed else "queued", error="media processing failed"))
+            db.execute(update(WorkflowRun).where(WorkflowRun.id == job.workflow_id).values(state="failed" if failed else "queued", error=last_error))
         db.commit()
 
 
@@ -140,13 +149,36 @@ async def process_once() -> int:
     job_id = await asyncio.to_thread(claim_job, worker_id)
     if not job_id:
         return 0
+    deadline = settings.processing_deadline_floor_seconds
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        if job:
+            source = db.get(Source, job.source_id)
+            if source and source.media_path:
+                try:
+                    from .media import probe
+                    duration = probe(Path(source.media_path)).duration
+                    deadline = max(settings.processing_deadline_floor_seconds, settings.processing_deadline_duration_multiplier * duration)
+                except Exception:
+                    logger.warning("job_deadline_probe_failed", extra={"job_id": job_id})
     task = asyncio.create_task(asyncio.to_thread(process_job, job_id, worker_id))
+    started = time.monotonic()
     try:
         while not task.done():
-            await asyncio.wait({task}, timeout=LEASE_SECONDS / 3)
+            remaining = deadline - (time.monotonic() - started)
+            if remaining <= 0:
+                await asyncio.to_thread(fail_job, job_id, worker_id, "processing deadline exceeded")
+                task.cancel()
+                JOB_DEADLINE_EXCEEDED.inc()
+                logger.warning("job_processing_deadline_exceeded", extra={"job_id": job_id, "deadline_seconds": round(deadline, 2)})
+                break
+            await asyncio.wait({task}, timeout=min(LEASE_SECONDS / 3, remaining))
             if not task.done():
-                await asyncio.to_thread(renew_lease, job_id, worker_id)
-                Path("/tmp/soe-worker-heartbeat").touch()  # noqa: S108
+                if time.monotonic() - started < deadline:
+                    await asyncio.to_thread(renew_lease, job_id, worker_id)
+                    Path("/tmp/soe-worker-heartbeat").touch()  # noqa: S108
+        if not task.done() or task.cancelled():
+            return 1
         await task
     except Exception:
         import sentry_sdk

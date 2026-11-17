@@ -25,7 +25,7 @@ class MediaProbe:
 def detect_scene_boundaries(path: Path, threshold: float = 0.35) -> list[float]:
     """Detect scene boundaries using FFmpeg's scene score filter."""
     expression = f"select=gt(scene\\,{threshold}),showinfo"
-    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-vf", expression, "-an", "-f", "null", "-"], timeout=settings.ffmpeg_timeout_seconds, capture_output=True, text=True)  # noqa: S603 -- argv list, trusted executable, no shell.
+    result = run_media_command([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-vf", expression, "-an", "-f", "null", "-"], settings.ffmpeg_timeout_seconds)
     return [float(match) for match in re.findall(r"pts_time:([0-9]+(?:\\.[0-9]+)?)", result.stderr)]
 
 
@@ -50,16 +50,30 @@ def _binary(name: str) -> str:
     return value
 
 
+def run_media_command(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Run a media command with a hard kill, rather than leaving descendants alive."""
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)  # noqa: S603
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise MediaProcessingError("media processing exceeded the configured deadline") from None
+    if process.returncode:
+        raise MediaProcessingError("media processing command failed")
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 def probe(path: Path) -> MediaProbe:
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
-        result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], timeout=settings.ffmpeg_timeout_seconds, capture_output=True, text=True, check=True)  # noqa: S603 -- argv list, trusted executable, no shell.
+        result = run_media_command([ffprobe, "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], settings.ffmpeg_timeout_seconds)
         body = json.loads(result.stdout)
         video = next((s for s in body.get("streams", []) if s.get("codec_type") == "video"), None)
         if not video:
             raise MediaProcessingError("media has no video stream")
         return MediaProbe(float(body["format"]["duration"]), int(video["width"]), int(video["height"]), any(s.get("codec_type") == "audio" for s in body.get("streams", [])))
-    result = subprocess.run([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-f", "null", "-"], timeout=settings.ffmpeg_timeout_seconds, capture_output=True, text=True)  # noqa: S603 -- argv list, trusted executable, no shell.
+    result = run_media_command([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-f", "null", "-"], settings.ffmpeg_timeout_seconds)
     text = result.stderr
     duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)
     video_match = re.search(r"Video: .*?(\d{2,5})x(\d{2,5})", text)
@@ -89,7 +103,7 @@ def render_vertical(source: Path, output: Path, start: float, end: float, subtit
     vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1"
     if subtitle_file:
         vf += f",subtitles={subtitle_file.as_posix()}"
-    subprocess.run([_binary("ffmpeg"), "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", str(output)], timeout=settings.ffmpeg_timeout_seconds, capture_output=True, text=True, check=True)  # noqa: S603 -- argv list, trusted executable, no shell.
+    run_media_command([_binary("ffmpeg"), "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", str(output)], settings.ffmpeg_timeout_seconds)
     if not output.is_file() or output.stat().st_size == 0:
         raise MediaProcessingError("FFmpeg did not produce a usable output")
     return output

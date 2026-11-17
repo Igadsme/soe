@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-
 from app import integrations, media, publishing, transcription
 
 
@@ -29,7 +28,7 @@ def test_binary_lookup_and_fallback(monkeypatch):
 def test_probe_branches(monkeypatch, tmp_path):
     monkeypatch.setattr(media.shutil, 'which', lambda _: '/bin/ffprobe')
     body = {'format': {'duration': '12.5'}, 'streams': [{'codec_type': 'video', 'width': 1280, 'height': 720}, {'codec_type': 'audio'}]}
-    monkeypatch.setattr(media.subprocess, 'run', lambda *a, **k: result(json.dumps(body)))
+    monkeypatch.setattr(media, 'run_media_command', lambda *a, **k: result(json.dumps(body)))
     assert media.probe(tmp_path).duration == 12.5
     assert media.probe(tmp_path).has_audio
     body['streams'] = []
@@ -37,9 +36,9 @@ def test_probe_branches(monkeypatch, tmp_path):
         media.probe(tmp_path)
     monkeypatch.setattr(media.shutil, 'which', lambda _: None)
     monkeypatch.setattr(media, '_binary', lambda _: '/ffmpeg')
-    monkeypatch.setattr(media.subprocess, 'run', lambda *a, **k: result(stderr='Duration: 01:02:03.50 Video: h264 1920x1080 Audio: aac'))
+    monkeypatch.setattr(media, 'run_media_command', lambda *a, **k: result(stderr='Duration: 01:02:03.50 Video: h264 1920x1080 Audio: aac'))
     assert media.probe(tmp_path) == media.MediaProbe(3723.5, 1920, 1080, True)
-    monkeypatch.setattr(media.subprocess, 'run', lambda *a, **k: result(stderr='invalid'))
+    monkeypatch.setattr(media, 'run_media_command', lambda *a, **k: result(stderr='invalid'))
     with pytest.raises(media.MediaProcessingError):
         media.probe(tmp_path)
 
@@ -55,11 +54,11 @@ def test_ingest_render_and_scene(monkeypatch, tmp_path):
         media.ingest_authorized(str(tmp_path/'missing'), destination)
     monkeypatch.setattr(media, '_binary', lambda _: '/ffmpeg')
     commands = []
-    def run(command, **kwargs):
+    def run(command, timeout):
         commands.append(command)
         if command[-1] != '-': Path(command[-1]).write_bytes(b'output')
         return result(stderr='pts_time:12 pts_time:20')
-    monkeypatch.setattr(media.subprocess, 'run', run)
+    monkeypatch.setattr(media, 'run_media_command', run)
     output = tmp_path/'output.mp4'
     media.render_vertical(source, output, 1, 4, tmp_path/'captions.srt')
     assert commands[0][:6] == ['/ffmpeg', '-y', '-ss', '1', '-to', '4']
@@ -69,7 +68,7 @@ def test_ingest_render_and_scene(monkeypatch, tmp_path):
     for start, end in [(2, 1), (0, 10000)]:
         with pytest.raises(media.MediaProcessingError): media.render_vertical(source, output, start, end)
     output.unlink()
-    monkeypatch.setattr(media.subprocess, 'run', lambda *a, **k: result())
+    monkeypatch.setattr(media, 'run_media_command', lambda *a, **k: result())
     with pytest.raises(media.MediaProcessingError): media.render_vertical(source, output, 0, 2)
 
 
