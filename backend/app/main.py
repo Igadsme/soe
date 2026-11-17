@@ -76,6 +76,21 @@ app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in setti
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_backoffs: dict[str, tuple[int, float]] = {}
+_LOGIN_BACKOFF_MAX = 10000
+
+
+def _prune_login_backoffs(protect: str) -> None:
+    """Bound backoff memory without letting username flooding reset the admin backoff."""
+    if len(_login_backoffs) < _LOGIN_BACKOFF_MAX:
+        return
+    now = time.monotonic()
+    for key in [k for k, (_, until) in _login_backoffs.items() if until <= now and k != protect]:
+        del _login_backoffs[key]
+    while len(_login_backoffs) >= _LOGIN_BACKOFF_MAX:
+        victim = min((k for k in _login_backoffs if k != protect), key=lambda k: _login_backoffs[k][1], default=None)
+        if victim is None:
+            break
+        del _login_backoffs[victim]
 
 
 def client_ip(request: Request) -> str:
@@ -210,8 +225,7 @@ async def login(request: Request, username: str = Form(..., max_length=255), pas
         raise HTTPException(503, "authentication is not configured")
     password_ok = await run_in_threadpool(verify_password, password, secret_value(settings.admin_password_hash)) if settings.admin_password_hash else settings.env == "development" and hmac.compare_digest(password.encode(), secret_value(settings.admin_password).encode())
     if not hmac.compare_digest(username.encode(), settings.admin_username.encode()) or not password_ok:
-        if len(_login_backoffs) >= 10000:
-            _login_backoffs.clear()
+        _prune_login_backoffs(protect="user:" + settings.admin_username.casefold())
         failures += 1
         _login_backoffs[key] = (failures, time.monotonic() + (min(3600, 2 ** min(failures - 4, 12)) if failures >= 5 else 0))
         raise HTTPException(401, "invalid credentials")

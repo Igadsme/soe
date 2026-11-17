@@ -394,3 +394,18 @@ def test_migration_publication_dedup_preserves_metrics(tmp_path, monkeypatch):
         assert db.scalar(text('SELECT COUNT(*) FROM publications')) == 1
         assert db.scalar(text('SELECT publication_id FROM metric_events')) == 1
     engine.dispose()
+
+
+def test_login_backoff_survives_username_flooding(monkeypatch):
+    import time as _time
+    from app import main as _main
+    from app.config import settings as _settings
+
+    monkeypatch.setattr(_main, "_LOGIN_BACKOFF_MAX", 50)
+    admin_key = "user:" + _settings.admin_username.casefold()
+    _main._login_backoffs[admin_key] = (6, _time.monotonic() + 120)
+    for i in range(200):
+        _main._login_backoffs[f"user:flood{i}"] = (1, 0)
+        _main._prune_login_backoffs(protect=admin_key)
+    assert _main._login_backoffs[admin_key][0] == 6
+    assert len(_main._login_backoffs) < 50
