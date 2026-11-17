@@ -1,7 +1,6 @@
 import pytest
-from fastapi.testclient import TestClient
-
 from app.config import Settings
+from fastapi.testclient import TestClient
 
 
 def production_settings(**overrides):
@@ -52,6 +51,13 @@ def test_validation_does_not_disclose_values():
 
 def test_development_retains_defaults():
     Settings(_env_file=None, env="development").validate_production()
+
+
+def test_processing_deadline_settings():
+    config = Settings(_env_file=None, processing_deadline_floor_seconds=300,
+                      processing_deadline_duration_multiplier=5)
+    assert config.processing_deadline_floor_seconds == 300
+    assert config.processing_deadline_duration_multiplier == 5
 
 
 def test_lifespan_validates_production(monkeypatch):

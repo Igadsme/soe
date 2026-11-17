@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     dev_auth_bypass: bool = False
     session_idle_seconds: int = 1800
     ffmpeg_timeout_seconds: float = 300
+    processing_deadline_floor_seconds: float = Field(default=300, ge=1)
+    processing_deadline_duration_multiplier: float = Field(default=5, ge=1)
     max_source_seconds: float = 3600
     whisper_cache_dir: str = "/app/.cache/whisper"
     media_root: str = "./media"
