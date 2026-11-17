@@ -6,6 +6,10 @@ retention=${SOE_BACKUP_RETENTION_DAYS:-14}
 case "$interval" in ''|*[!0-9]*|0) echo 'Invalid backup interval' >&2; exit 2;; esac
 [ "$interval" -gt 0 ] || { echo 'Backup interval must be positive' >&2; exit 2; }
 case "$retention" in ''|*[!0-9]*) echo 'Invalid backup retention' >&2; exit 2;; esac
+if [ -n "${SOE_BACKUP_S3_BUCKET:-}" ] && [ -z "${SOE_BACKUP_ENCRYPTION_PASSPHRASE:-}" ]; then
+  echo "ERROR: SOE_BACKUP_ENCRYPTION_PASSPHRASE is required for S3 backups" >&2
+  exit 1
+fi
 mkdir -p /backups
 partial=
 plain=

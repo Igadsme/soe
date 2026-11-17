@@ -127,4 +127,29 @@ async def test_redis_calls_run_off_event_loop(monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=main.app), base_url='http://test') as client:
         assert (await client.get('/health')).status_code == 200
         assert (await client.post('/api/v1/auth/login', data={'username':'operator','password':'test'})).status_code == 200
-    assert len(calls) == 4  # General requests plus both login limits.
+    assert len(calls) == 5  # General requests plus three login limits.
+
+
+@pytest.mark.asyncio
+async def test_redis_client_reused_for_limits_and_readiness(monkeypatch):
+    clients = []
+
+    class Client(MemoryRedis):
+        async def ping(self):
+            return True
+
+    def create(*args, **kwargs):
+        client = Client()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(rate_limit.AsyncRedis, 'from_url', create)
+    try:
+        assert not await rate_limit.async_redis_limited('redis://reuse', 'login', 'user', 2)
+        assert not await rate_limit.async_redis_limited('redis://reuse', 'login', 'user', 2)
+        assert await rate_limit.redis_ready('redis://reuse')
+        assert len(clients) == 1
+        assert not await rate_limit.async_redis_limited('redis://other', 'login', 'user', 2)
+        assert len(clients) == 2
+    finally:
+        await rate_limit.close_redis_clients()

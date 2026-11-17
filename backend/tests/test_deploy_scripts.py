@@ -61,3 +61,19 @@ print(generate_latest(registry).decode())
     result = subprocess.run(['python', '-c', collect, *map(str, pids)], env=env, capture_output=True, text=True, check=True)
     assert 'soe_http_requests_total{method="GET",route="/health",status="200"} 2.0' in result.stdout
     assert 'soe_http_requests_in_progress 0.0' in result.stdout
+
+
+def test_offsite_backup_requires_encryption_before_dump(tmp_path):
+    marker = tmp_path / 'called'
+    for command in ('pg_dump', 'pg_restore', 'aws', 'rclone'):
+        stub = tmp_path / command
+        stub.write_text('#!/bin/sh\ntouch "$SOE_TEST_CALLED"\nexit 99\n')
+        stub.chmod(0o700)
+    env = {**os.environ, 'PATH': str(tmp_path) + ':' + os.environ['PATH'],
+           'SOE_BACKUP_S3_BUCKET': 'test-bucket', 'SOE_BACKUP_ENCRYPTION_PASSPHRASE': '',
+           'SOE_TEST_CALLED': str(marker)}
+    result = subprocess.run(['bash', str(ROOT / 'infra/backup/backup.sh')], env=env,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert 'SOE_BACKUP_ENCRYPTION_PASSPHRASE is required' in result.stderr
+    assert not marker.exists()

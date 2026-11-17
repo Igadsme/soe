@@ -51,6 +51,8 @@ class Settings(BaseSettings):
         errors = []
         if secret_value(self.admin_password):
             errors.append("SOE_ADMIN_PASSWORD is forbidden; use SOE_ADMIN_PASSWORD_HASH")
+        if self.metrics_enabled and not secret_value(self.metrics_token).strip():
+            errors.append("SOE_METRICS_TOKEN is required when metrics are enabled")
         if self.publishing_enabled:
             errors.append("SOE_PUBLISHING_ENABLED must be false until media publishing is implemented")
         if len(secret_value(self.session_secret).strip()) < 32:

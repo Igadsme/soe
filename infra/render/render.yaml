@@ -24,6 +24,8 @@ services:
         sync: false
       - key: SOE_CORS_ORIGINS
         sync: false
+      # Expected Render LB peers: 10.0.0.0/8. Verify for your service before setting.
+      # Required: supply verified ingress CIDRs; see DEPLOYMENT.md.
       - key: SOE_TRUSTED_PROXIES
         sync: false
       - key: SOE_SENTRY_DSN

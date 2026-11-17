@@ -77,13 +77,13 @@ def test_proxy_chain_right_to_left_and_bypass(monkeypatch):
 
 
 def test_username_backoff_rotating_forwarded_ips(monkeypatch):
-    monkeypatch.setattr(main.settings, 'trusted_proxies', '127.0.0.1/32')
+    monkeypatch.setattr(main.settings, 'trusted_proxies', '')
     monkeypatch.setattr(auth.settings, 'admin_password', 'test-only-password')
     with TestClient(main.app) as client:
         for index in range(5):
             assert client.post('/api/v1/auth/login', data={'username':'operator','password':'wrong'}, headers={'X-Forwarded-For':f'192.0.2.{index}'}).status_code == 401
         assert client.post('/api/v1/auth/login', data={'username':'operator','password':'wrong'}, headers={'X-Forwarded-For':'192.0.2.99'}).status_code == 429
-        assert main._login_backoffs['user:operator'][0] == 5
+        assert main._login_backoffs[('operator', '127.0.0.1')][0] == 5
 
 
 def test_production_defaults_staging_and_publishing(monkeypatch):
@@ -402,10 +402,27 @@ def test_login_backoff_survives_username_flooding(monkeypatch):
     from app.config import settings as _settings
 
     monkeypatch.setattr(_main, "_LOGIN_BACKOFF_MAX", 50)
-    admin_key = "user:" + _settings.admin_username.casefold()
+    admin_key = (_settings.admin_username.casefold(), "127.0.0.1")
     _main._login_backoffs[admin_key] = (6, _time.monotonic() + 120)
     for i in range(200):
-        _main._login_backoffs[f"user:flood{i}"] = (1, 0)
+        _main._login_backoffs[(f"flood{i}", "127.0.0.1")] = (1, 0)
         _main._prune_login_backoffs(protect=admin_key)
     assert _main._login_backoffs[admin_key][0] == 6
     assert len(_main._login_backoffs) < 50
+
+
+def test_login_backoff_isolated_by_trusted_client_ip(monkeypatch):
+    monkeypatch.setattr(main.settings, 'session_secret', 'test-session-secret-at-least-32-characters')
+    monkeypatch.setattr(main.settings, 'trusted_proxies', '127.0.0.1/32')
+    monkeypatch.setattr(main.settings, 'admin_password', 'test-only-password')
+    with TestClient(main.app) as client:
+        for _ in range(5):
+            assert client.post('/api/v1/auth/login', data={'username': 'operator', 'password': 'wrong'}, headers={'X-Forwarded-For': '192.0.2.1'}).status_code == 401
+        assert client.post('/api/v1/auth/login', data={'username': 'operator', 'password': 'test-only-password'}, headers={'X-Forwarded-For': '192.0.2.2'}).status_code == 200
+        assert main._login_backoffs[('operator', '192.0.2.1')][0] == 5
+        assert ('operator', '192.0.2.2') not in main._login_backoffs
+        for index in range(3, 27):
+            assert client.post('/api/v1/auth/login', data={'username': 'operator', 'password': 'wrong'}, headers={'X-Forwarded-For': f'192.0.2.{index}'}).status_code == 401
+        response = client.post('/api/v1/auth/login', data={'username': 'operator', 'password': 'wrong'}, headers={'X-Forwarded-For': '192.0.2.99'})
+        assert response.status_code == 429
+        assert response.headers['Retry-After'] == '60'
