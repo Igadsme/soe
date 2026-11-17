@@ -1,0 +1,69 @@
+# TEMPLATE ONLY: requires owner review. Applying a Blueprint provisions billable resources.
+# Do not apply unchanged. Placeholder names/origins and shared media require resolution.
+services:
+  - type: web
+    name: soe-api-template
+    runtime: docker
+    dockerfilePath: ./infra/api/Dockerfile
+    preDeployCommand: alembic upgrade head
+    healthCheckPath: /ready
+    envVars:
+      - key: SOE_ENV
+        value: production
+      - key: SOE_RUN_MIGRATIONS
+        value: "false"
+      - key: SOE_METRICS_ENABLED
+        value: "false"
+      - key: SOE_DATABASE_URL
+        sync: false
+      - key: SOE_REDIS_URL
+        sync: false
+      - key: SOE_SESSION_SECRET
+        sync: false
+      - key: SOE_ADMIN_PASSWORD_HASH
+        sync: false
+      - key: SOE_CORS_ORIGINS
+        sync: false
+      - key: SOE_TRUSTED_PROXIES
+        sync: false
+      - key: SOE_SENTRY_DSN
+        sync: false
+  - type: worker
+    name: soe-worker-template
+    runtime: docker
+    dockerfilePath: ./infra/api/Dockerfile
+    dockerCommand: python -m app.worker
+    envVars:
+      - key: SOE_ENV
+        value: production
+      - key: SOE_RUN_MIGRATIONS
+        value: "false"
+      - key: SOE_DATABASE_URL
+        sync: false
+      - key: SOE_REDIS_URL
+        sync: false
+      - key: SOE_SESSION_SECRET
+        sync: false
+      - key: SOE_ADMIN_PASSWORD_HASH
+        sync: false
+      - key: SOE_CORS_ORIGINS
+        sync: false
+      - key: SOE_SENTRY_DSN
+        sync: false
+  - type: web
+    name: soe-frontend-template
+    runtime: docker
+    dockerfilePath: ./infra/frontend/Dockerfile
+    envVars:
+      # Passed as Docker build argument; configure before building.
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+  - type: keyvalue
+    name: soe-redis-template
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+databases:
+  - name: soe-postgres-template
+    databaseName: soe
+    user: soe
+    ipAllowList: []

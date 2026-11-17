@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
+[[ $# == 0 ]] || { echo "Usage: scripts/backup_db.sh" >&2; exit 2; }
 cd "$(dirname "$0")/.."
 backup_dir=${SOE_BACKUP_DIR:-./backups}
 retention_days=${SOE_BACKUP_RETENTION_DAYS:-14}

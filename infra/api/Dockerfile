@@ -20,6 +20,7 @@ COPY backend/app /app/app
 COPY alembic.ini /app/alembic.ini
 COPY backend/alembic /app/backend/alembic
 COPY --chmod=755 infra/api/entrypoint.sh /app/entrypoint.sh
+COPY infra/api/gunicorn.conf.py /app/gunicorn.conf.py
 USER soe
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

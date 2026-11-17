@@ -1,0 +1,6 @@
+# Explicit debugging opt-in. Never bind these ports to public interfaces.
+services:
+  api:
+    ports: ["127.0.0.1:8000:8000"]
+  frontend:
+    ports: ["127.0.0.1:3000:3000"]

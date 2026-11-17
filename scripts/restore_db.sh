@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+[[ $# == 1 ]] || { echo "Usage: scripts/restore_db.sh PATH_TO_DUMP" >&2; exit 2; }
+backup_file=$(realpath -- "$1")
 cd "$(dirname "$0")/.."
-backup_file=${1:?Usage: scripts/restore_db.sh PATH_TO_DUMP}
 [[ -f "$backup_file" ]] || { echo 'Backup file not found.' >&2; exit 2; }
 printf 'This replaces database objects in the configured production Compose database. Stop API/worker and take a fresh backup first.\n'
 read -r -p 'Type RESTORE to continue: ' confirmation
