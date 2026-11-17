@@ -319,6 +319,55 @@ def test_publication_idempotency_unique_constraint(isolated_database, monkeypatc
         with pytest.raises(IntegrityError): db.commit()
 
 
+def test_rerun_refused_when_clip_has_publication(isolated_database, tmp_path, monkeypatch):
+    from app.models import Publication, RightsRecord, Source
+    media_root = tmp_path / 'media'
+    media_root.mkdir()
+    source_media = media_root / 'source.mp4'
+    source_media.write_bytes(b'video')
+    monkeypatch.setattr(main.settings, 'media_root', str(media_root))
+    monkeypatch.setattr(worker.settings, 'media_root', str(media_root))
+    with isolated_database() as db:
+        source = Source(platform='upload', external_id='rerun-source', title='test', url='https://example.com', media_path=str(source_media))
+        db.add(source)
+        db.flush()
+        db.add(RightsRecord(source_id=source.id, authorization_type='owned', commercial_use=True,
+                            publishing_allowed=True, allowed_platforms=['youtube'], evidence='Owned test evidence'))
+        clip = Clip(source_id=source.id, start_seconds=0, end_seconds=1, description='clip',
+                    hook='hook', score=1, status='rendered')
+        db.add(clip)
+        db.flush()
+        db.add(Publication(clip_id=clip.id, platform='youtube', status='succeeded'))
+        db.commit()
+        source_id = source.id
+    with TestClient(main.app) as client:
+        response = client.post(f'/api/v1/sources/{source_id}/process')
+        assert response.status_code == 409
+        assert 'publications reference' in response.text
+
+
+def test_cleanup_only_removes_unreferenced_output_folders(isolated_database, tmp_path, monkeypatch):
+    from app.models import Source
+    root = tmp_path / 'media'
+    monkeypatch.setattr(main.settings, 'media_root', str(root))
+    monkeypatch.setattr(worker.settings, 'media_root', str(root))
+    with isolated_database() as db:
+        source = Source(platform='upload', external_id='cleanup-source', title='test', url='https://example.com')
+        db.add(source)
+        db.flush()
+        source_id = source.id
+        db.add(Clip(source_id=source_id, start_seconds=0, end_seconds=1, description='clip',
+                    hook='hook', score=1, status='rendered'))
+        db.commit()
+    source_root = root / 'clips' / f'source-{source_id}'
+    old = source_root / 'run-old'
+    keep = source_root / 'run-7'
+    old.mkdir(parents=True)
+    keep.mkdir(parents=True)
+    assert worker.cleanup_unreferenced_output_folders(source_id, 7) == 1
+    assert not old.exists() and keep.exists()
+
+
 def test_upload_db_failure_removes_partial_file(monkeypatch, isolated_database):
     from app.db import session
     def broken_session():
@@ -345,7 +394,7 @@ def test_idle_session_pruning(isolated_database, monkeypatch):
 async def test_ready_requires_configured_redis(isolated_database, monkeypatch):
     with isolated_database() as db:
         db.execute(text('CREATE TABLE alembic_version (version_num VARCHAR(32))'))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0005_security')")); db.commit()
+        db.execute(text("INSERT INTO alembic_version VALUES ('0007_schema_hardening')")); db.commit()
     async def unavailable(url): return False
     monkeypatch.setattr(main,'redis_ready',unavailable)
     monkeypatch.setattr(main.settings,'redis_url','redis://stub')
@@ -386,6 +435,8 @@ def test_migration_publication_dedup_preserves_metrics(tmp_path, monkeypatch):
     command.upgrade(config,'0004_jobs')
     engine = create_engine(url)
     with engine.begin() as db:
+        db.execute(text("INSERT INTO sources (id,platform,external_id,title,url,status,created_at) VALUES (1,'upload','source','Source','https://example.com','analyzed',CURRENT_TIMESTAMP)"))
+        db.execute(text("INSERT INTO clips (id,source_id,start_seconds,end_seconds,description,hook,score,status,evidence,created_at) VALUES (1,1,0,1,'clip','hook',1,'rendered','{}',CURRENT_TIMESTAMP)"))
         for publication_id in (1,2):
             db.execute(text("INSERT INTO publications (id,clip_id,platform,status,created_at) VALUES (:id,1,'youtube','queued',CURRENT_TIMESTAMP)"), {'id':publication_id})
         db.execute(text("INSERT INTO metric_events (publication_id,metric,value,verified,observed_at) VALUES (2,'views',10,1,CURRENT_TIMESTAMP)"))
