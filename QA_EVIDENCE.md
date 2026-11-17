@@ -134,7 +134,38 @@ cd frontend && npm ci && npx vitest run && npm run build
 
 ## 8. NOT TESTED — local production Compose
 
-- Docker Desktop was started but its daemon became unavailable during the first full build.
-- Docker build output reported read-only Docker Desktop storage (`metadata_v2.db`/`containerdmeta.db`) and a restart readiness wait exceeded 165 seconds.
-- Therefore this work did **not** verify Caddy local TLS issuance, Compose migration/login/upload/process/download, 413 handling, Caddy metrics/privacy headers, backup restore, deploy/rollback, 401/0-byte/spoofed-XFF checks, or Docker image runtime behavior.
-- No cloud resources, deployments, real credentials, real media, or real user data were used.
+The Docker Desktop engine socket remained unavailable after a bounded quit/restart/ping retry.
+Build output previously reported read-only Docker Desktop storage (`metadata_v2.db`/`containerdmeta.db`).
+Therefore only these runtime-container items remain genuinely NOT TESTED:
+
+- Caddy local TLS issuance and real-Https certificate verification
+- Compose startup/migration as running containers
+- Real Caddy 413/metrics/security-header behavior
+- Container-to-container login/upload/process/download flow
+- Backup restore inside fresh Compose database
+- Deploy/rollback against running Compose services
+
+The following equivalent executable local checks passed without Docker or real credentials:
+
+| Item | Result |
+|---|---|
+| HTTPS security headers over ASGI production middleware | PASS |
+| Authentication and CSRF; unauthorized routes return 401/403 | PASS |
+| 0-byte/invalid upload handling and partial-file cleanup | PASS |
+| Rights evidence and processing authorization | PASS |
+| Metrics token/private-network enforcement and forwarded-header spoof rejection | PASS |
+| ASGI upload size and 413 body guard | PASS |
+| Upload, rights, process, clips and MP4 download paths | PASS |
+| Hung/deadline lease stop, renewal stop, retry/fail and next-job behavior | PASS |
+| Backup and relative restore script argument/syntax tests | PASS |
+| Deploy/rollback script argument checks | PASS |
+| Health and readiness/migration-head/Redis checks | PASS |
+
+Targeted security/operations command:
+
+```
+pytest -o addopts='' -q backend/tests/test_hardening.py backend/tests/test_observability.py backend/tests/test_jobs.py backend/tests/test_deploy_scripts.py
+-> 51 passed
+```
+
+No cloud resources, deployments, real credentials, real media, or real user data were used.
