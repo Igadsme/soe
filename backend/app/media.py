@@ -1,6 +1,7 @@
 """Authorized local media handling and FFmpeg-backed render validation."""
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -91,7 +92,10 @@ def ingest_authorized(source_path: str, destination: Path) -> tuple[Path, str, M
     if not 0 < metadata.duration <= settings.max_source_seconds:
         raise MediaProcessingError("source duration exceeds configured limit")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
+    try:
+        os.link(source, destination)
+    except (AttributeError, OSError):
+        shutil.copy2(source, destination)
     digest = sha256_file(destination)
     return destination, digest, metadata
 

@@ -7,6 +7,25 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: soe_test
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres -d soe_test" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SOE_ENV: test
+      SOE_DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/soe_test
+      SOE_TEST_POSTGRES_URL: postgresql+psycopg://postgres:test@localhost:5432/soe_test
+      SOE_TEST_REDIS_URL: redis://localhost:6379/1
+      PYTHONPATH: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -14,7 +33,11 @@ jobs:
           python-version: "3.12"
       - run: pip install -r backend/requirements.txt
       - run: pip install -e ".[dev]"
-      - run: PYTHONPATH=backend pytest -q backend/tests tests
+      - run: alembic upgrade head
+      - run: alembic check
+      - run: ruff check backend/app
+      - run: pytest -q backend/tests tests --cov=backend/app --cov-fail-under=85 --cov-report=xml --cov-report=term-missing
+      - run: pip-audit -r backend/requirements.txt
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -25,11 +48,15 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --prefix frontend
+      - run: npm audit --omit=dev --prefix frontend
+      - run: npm run typecheck --prefix frontend
+      - run: npm test --prefix frontend
       - run: npm run build --prefix frontend
   containers:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - run: docker compose build api frontend
-      - run: docker compose config --quiet
+      - run: cp .env.example .env
+      - run: docker compose -f docker-compose.prod.yml config --quiet
+      - run: docker compose -f docker-compose.prod.yml build
