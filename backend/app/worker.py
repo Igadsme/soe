@@ -149,12 +149,18 @@ async def process_once() -> int:
                 Path("/tmp/soe-worker-heartbeat").touch()  # noqa: S108
         await task
     except Exception:
+        import sentry_sdk
+        sentry_sdk.capture_exception()
         await asyncio.to_thread(fail_job, job_id, worker_id)
         logger.error("job_processing_failed")
     return 1
 
 
 async def run_forever(interval_seconds: int = 10) -> None:
+    from .logging_config import configure_logging
+    from .observability import init_sentry
+    configure_logging()
+    init_sentry()
     settings.validate_production()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

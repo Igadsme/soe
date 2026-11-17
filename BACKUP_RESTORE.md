@@ -24,3 +24,20 @@ These scripts use `docker compose -f docker-compose.prod.yml exec -T db` and the
 - Copy encrypted backups to off-site storage in a separate failure domain/account, with private access, retention and deletion protection. Verify transfer and recovery; the local retention setting does not manage remote copies.
 - Back up the media volume/object store independently and coordinate database/media recovery points. Document retention, data deletion and legal requirements.
 - For managed PostgreSQL, enable provider snapshots/PITR and run provider-supported exports/restores; the Compose scripts will not back up an external database.
+
+## Scheduled encrypted off-site backups
+
+The optional Compose `backup` profile supplies the scheduler, encryption and S3 upload described in [DEPLOYMENT.md](DEPLOYMENT.md). The manual host scripts above remain local-only. For scheduled archives, owner actions above apply to the supplied encryption/upload implementation: configure and test them before launch. Retention uses whole days and runs only after a successful backup/upload. Remote retention is independent.
+
+To recover a remote object, use rclone on a trusted recovery host with an `offsite` S3 remote configured from the same endpoint, region and restricted credentials (prefer a secret manager; never credentials in command arguments):
+
+```sh
+umask 077
+rclone copyto offsite:BUCKET/PREFIX/soe-TIMESTAMP.dump.gpg /secure/recovery.dump.gpg
+# GPG prompts for the separately stored recovery passphrase.
+gpg --output /secure/recovery.dump --decrypt /secure/recovery.dump.gpg
+pg_restore --list /secure/recovery.dump >/dev/null
+scripts/restore_db.sh /secure/recovery.dump
+```
+
+For an unencrypted `.dump` object, download it directly and skip decryption. Restore accepts any local custom-format archive, including one downloaded from S3; the basename is irrelevant. Use absolute paths. The script also resolves relative paths against the caller's original directory before changing directories. It requires exactly one argument and always prompts before destructive restoration. Verify the isolated target, stop writers and follow the full restore procedure above. For off-site restore testing, download the object rather than using the local source copy. Do not put decryption passphrases in shell history; securely remove plaintext recovery files after the drill according to your storage policy.

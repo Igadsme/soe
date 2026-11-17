@@ -89,4 +89,29 @@ Publishing remains blocked: **publishing.py's YouTube upload sends metadata only
 
 1. Review `infra/ci/ci.yml`, set repository protections and dependency-update ownership, and have a user/token with **workflow permission** copy it to `.github/workflows/ci.yml`. This task deliberately does not change workflow files. CI includes lint, coverage report, both audits, typecheck/build, a fresh SQLite migration, Compose config and production image builds using placeholders.
 2. Run `scripts/ci_checks.sh` in the configured Python environment locally. The backend line coverage threshold is enforced at 85%; do not confuse test coverage with a launch approval.
-3. Decide the fate of `src/soe` and `tests/test_app.py`: they are a **separate unused FastAPI scaffold**, not the production `backend/app` application. Recommendation: remove them in an owner-approved cleanup, or move any useful behavior into `backend/app` and consolidate tests. They are intentionally unchanged in this phase and still included in verification.
+3. Decide the fate of `src/soe` and `tests/test_app.py`: they are a **separate unused FastAPI scaffold**, not the production `backend/app` application. Recommendation: delete them in a separate owner-approved cleanup after checking for unique behavior and porting any needed tests. Deletion removes ambiguous entrypoints and maintenance overhead. Merging useful parts into `backend/app` preserves behavior but needs explicit compatibility review; retaining a separate package requires its own ownership, release process and tests and keeps deployment ambiguity. Deletion is preferred because this scaffold is unused. They are intentionally unchanged in this phase and still included in verification.
+
+
+## Container-host readiness additions
+
+### Done
+
+- Caddy same-origin HTTPS ingress, public metrics denial, shared upload cap, security headers, compressed responses, sanitized JSON access logs and persistent certificate/config volumes. Explicit subnet and trusted Caddy address; loopback ports require the debugging override.
+- SHA-tagged build/migrate/start/HTTPS-check deploy script and explicit previous-ref rollback wrapper; migration downgrade risks documented.
+- Opt-in scheduled PostgreSQL custom archives, validation, local retention, optional client encryption and S3-compatible upload. Failure exits nonzero; local manual scripts retained and relative restore paths fixed.
+- Opt-in protected Prometheus HTTP/queue metrics with Gunicorn multiprocess lifecycle, plus opt-in scrubbed Sentry for API and worker. Unit tests added.
+- Runbooks cover DNS/first release, migrations, rollback, off-site recovery, rotation, scaling, alerts and incidents. Fly/Render files are owner-review templates only.
+- `.dockerignore` excludes `src/`, `tests/test_app.py` and backup artifacts. API Dockerfile copies only `backend/app` application code; Compose/platform entrypoints use `app.main:app`, never the scaffold. Protected scaffold files remain unchanged.
+
+### Owner actions before launch
+
+Choose and secure a host, check subnet availability, provision DNS/storage/credentials, build and validate images on that host, issue real TLS certificates and perform browser/processing smoke tests. Enable scheduled off-site encrypted backups, remote lifecycle/deletion protection and host-level failure/staleness alerting; run a timed restore from a downloaded remote object. Back up media separately. Establish RPO/RTO, retention and incident ownership. Configure private authenticated metrics scraping, external HTTPS checks, log collection and optional Sentry privacy review. Validate scaling/storage capacity and review optional platform templates before any provisioning. Existing provider publishing, security/legal and product launch blockers above still apply; infrastructure additions do not make publishing complete. No cloud accounts/resources were created.
+
+
+### Repository verification (2026-11-17)
+
+- Required dependency installation and full pytest command: **130 passed, 3 skipped; 97.77% backend coverage** (85% threshold unchanged).
+- `ruff check backend/app`: passed. `pip-audit -r backend/requirements.txt`: no known vulnerabilities.
+- Production Compose and local-ports override `config --quiet` using `/tmp/soe-test.env`: passed without requiring a real `.env`.
+- `bash -n scripts/*.sh`, scheduled-backup shell syntax and Caddy `caddy:2-alpine` validation for localhost: passed.
+- Backup image built successfully. No Compose services were started, no existing containers/volumes removed, and no cloud resources created. Actual public TLS issuance, off-site transfer, restore drills and platform deployment remain owner validation tasks.

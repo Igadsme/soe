@@ -81,6 +81,9 @@ async def test_brute_force_limit_and_generic_error(client):
 async def test_all_routes_require_auth(client):
     public = {"/health", "/ready", "/api/v1/auth/login"}
     for route in main.app.routes:
+        if route.path == "/metrics":
+            assert (await client.get("/metrics")).status_code == 404
+            continue
         if route.path in public:
             continue
         url = re.sub(r"\{[^}]+\}", "1", route.path)

@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     rate_limit_per_minute: int = 120
     trusted_proxies: str = ""
+    metrics_enabled: bool = False
+    metrics_token: SecretStr = SecretStr("")
+    sentry_dsn: SecretStr = SecretStr("")
+    sentry_traces_sample_rate: float = Field(default=0, ge=0, le=1)
     redis_url: str = Field(default="", repr=False)
 
     @field_validator("env")

@@ -66,6 +66,8 @@ from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_medi
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
+    from .observability import init_sentry
+    init_sentry()
     settings.validate_production()
     yield
 
@@ -140,6 +142,9 @@ async def request_limited(windows, key: str, limit: int) -> bool:
 
 @app.exception_handler(Exception)
 async def unhandled_error(request: Request, _exc: Exception):
+    if secret_value(settings.sentry_dsn):
+        import sentry_sdk
+        sentry_sdk.capture_exception(_exc)
     request_id = getattr(request.state, "request_id", uuid4().hex)
     # Provider exception text and tracebacks may include credentials.
     logging.getLogger("soe.errors").error("unhandled request error", extra={"request_id": request_id})
@@ -511,3 +516,14 @@ def logout_all(request: Request, username: str = Depends(require_auth)) -> dict:
 from .request_guard import RequestGuard  # noqa: E402
 
 app.add_middleware(RequestGuard)
+
+
+from .observability import MetricsMiddleware, metrics_response  # noqa: E402
+
+
+@app.get("/metrics")
+def metrics(request: Request, db: Session = Depends(session)):
+    return metrics_response(request, db)
+
+
+app.add_middleware(MetricsMiddleware)

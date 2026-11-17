@@ -13,3 +13,10 @@
 **/.env.*
 !.env.example
 **/*.log
+
+# Unused scaffold and local operational data must never enter images.
+src/
+tests/test_app.py
+backups/
+**/*.dump
+**/*.gpg

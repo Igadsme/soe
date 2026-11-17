@@ -1,0 +1,31 @@
+# TEMPLATE ONLY: owner review required. Replace app name, region and secret values.
+app = "replace-with-owned-soe-api-app"
+primary_region = "iad"
+
+[build]
+  dockerfile = "infra/api/Dockerfile"
+
+[deploy]
+  release_command = "alembic upgrade head"
+
+[env]
+  SOE_ENV = "production"
+  SOE_RUN_MIGRATIONS = "false"
+  SOE_DEMO_MODE = "false"
+  SOE_PUBLISHING_ENABLED = "false"
+  PORT = "8000"
+  SOE_WEB_CONCURRENCY = "1"
+  SOE_METRICS_ENABLED = "false"
+  SOE_MEDIA_ROOT = "/app/media"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "off"
+  min_machines_running = 1
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/ready"
