@@ -32,10 +32,26 @@ Set `SOE_WEB_CONCURRENCY` to change Gunicorn processes per API container and rec
 docker compose -f docker-compose.prod.yml up -d --scale worker=2
 ```
 
-The current worker advances queued workflows to rights review; it has no atomic claim/locking protocol. Keep one worker for now; multiple replicas can select the same workflow. Add transactional job claiming before relying on parallel processing. Redis is internal and provides shared atomic rate limits; the current worker polls PostgreSQL.
+Workers can scale safely against the same PostgreSQL database and shared media volume. Processing jobs use transactional `FOR UPDATE SKIP LOCKED` claims (conditional UPDATE on SQLite), 120-second renewable leases, and ownership-fenced completion. Crashed claims are reclaimed after expiry; each claim consumes an attempt. Jobs retry with exponential backoff (2, 4 seconds), then fail after three attempts. SIGTERM stops claiming and lets the current job finish while renewing its lease. Redis supplies rate limits; job persistence is in PostgreSQL.
 
 Only API and frontend ports are published, on `127.0.0.1` by default. Terminate HTTPS with a reverse proxy and route to these ports. Named volumes persist PostgreSQL and shared media; configure encrypted backups and test restores. Rebuild the frontend whenever its public API URL changes. Use `.env` and secret-management tooling appropriate for your host; never bake credentials into images.
 
-The existing `docker-compose.yml` remains the development configuration. Production infrastructure does not complete the provider OAuth, publishing, analytics, or durable job-processing features; those still need authorized accounts and further implementation.
+The existing `docker-compose.yml` remains the development configuration. Production infrastructure does not complete the provider OAuth, publishing, analytics, features; those still need authorized accounts and further implementation.
 
 Production requires `SOE_REDIS_URL` (Compose defaults API/worker to `redis://redis:6379/0`). All API workers/replicas must share this Redis database. General and login counters use 60-second fixed windows starting with the first request, with the existing limits. If Redis fails, general requests fail open with a sanitized warning; login fails closed with HTTP 503, `login temporarily unavailable`, and `Retry-After: 60`. Empty URLs use the in-memory sliding windows only in development/tests; production validation rejects them. Redis data loss clears counters.
+
+Run `PYTHONPATH=backend python -m app.worker` locally after `alembic upgrade head`.
+The worker validates production settings at startup, touches `/tmp/soe-worker-heartbeat`
+while polling and during long jobs, and cleans up expired/revoked sessions hourly.
+`SOE_SESSION_RETENTION_SECONDS` defaults to 604800 (seven days after expiry or
+revocation). Set `SOE_ENV_FILE` to choose the settings dotenv file; tests use a
+nonexistent path and disposable databases. `/ready` resolves migrations relative
+to the installed package, independently of the launch directory.
+
+Monitor queued age, attempts, failed jobs and disk usage. Failed jobs remain
+available for inspection through the authenticated jobs API; submitting processing
+again without the original idempotency key creates a new job. Keys are hashed in
+the DB and replay completed responses. Shared media storage must be mounted at the
+same path in every API and worker replica. Each attempt writes its own workspace;
+plan retention for abandoned attempt files. Publication queue execution is still
+incomplete and separate from source processing.

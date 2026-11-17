@@ -1,3 +1,5 @@
+import os
+
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,6 +20,7 @@ class Settings(BaseSettings):
     admin_password: SecretStr = SecretStr("")
     admin_password_hash: SecretStr = SecretStr("")
     session_secret: SecretStr = SecretStr("")
+    session_retention_seconds: int = Field(default=604800, ge=0)
     session_ttl_seconds: int = 28800
     cors_origins: str = "http://localhost:3000"
     rate_limit_per_minute: int = 120
@@ -50,7 +53,7 @@ class Settings(BaseSettings):
         if errors:
             raise RuntimeError("Invalid production configuration: " + "; ".join(errors))
 
-    model_config = SettingsConfigDict(env_prefix="SOE_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="SOE_", env_file=os.environ.get("SOE_ENV_FILE", ".env"), extra="ignore")
 
 
 settings = Settings()

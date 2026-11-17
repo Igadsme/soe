@@ -25,6 +25,7 @@ def redis_client(url: str) -> Redis:
 
 
 def redis_limited(url: str, scope: str, key: str, limit: int) -> bool:
+    # Synchronous boundary: async request handlers invoke limited in a threadpool.
     # Avoid storing raw usernames/IPs and delimiter collisions in Redis keys.
     digest = sha256(key.encode()).hexdigest()
     return bool(redis_client(url).eval(_COUNTER, 1, f"soe:rl:{scope}:{digest}", limit))

@@ -67,7 +67,12 @@ class ClipRead(Highlight):
         return self
 
 
-class SourceRead(SourceCreate):
+class SourceRead(BaseModel):
+    platform: str
+    external_id: str
+    title: str
+    url: str
+    has_media: bool
     id: int
     status: str
     created_at: datetime

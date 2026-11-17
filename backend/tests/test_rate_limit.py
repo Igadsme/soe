@@ -106,3 +106,21 @@ def test_empty_url_uses_local_windows(monkeypatch):
     for _ in range(5):
         assert not main.limited(main._login_windows, "test", 5)
     assert main.limited(main._login_windows, "test", 5)
+
+
+@pytest.mark.asyncio
+async def test_redis_calls_run_off_event_loop(monkeypatch):
+    import threading
+    from httpx import ASGITransport, AsyncClient
+    loop_thread = threading.get_ident()
+    calls = []
+    def limited(*args):
+        calls.append(threading.get_ident())
+        assert threading.get_ident() != loop_thread
+        return False
+    monkeypatch.setattr(main, 'redis_limited', limited)
+    monkeypatch.setattr(main.settings, 'redis_url', 'redis://test-only/0')
+    async with AsyncClient(transport=ASGITransport(app=main.app), base_url='http://test') as client:
+        assert (await client.get('/health')).status_code == 200
+        assert (await client.post('/api/v1/auth/login', data={'username':'operator','password':'test'})).status_code == 200
+    assert len(calls) == 4  # General requests plus both login limits.

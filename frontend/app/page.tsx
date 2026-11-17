@@ -2,7 +2,7 @@
 import { FormEvent, useEffect, useState } from "react";
 
 type Overview = { environment: string; demo_mode: boolean; counts: Record<string, number>; revenue_cents: number; expense_cents: number };
-type Source = { id: number; platform: string; title: string; url: string; status: string };
+type Source = { has_media: boolean; id: number; platform: string; title: string; url: string; status: string };
 type Clip = { id: number; source_id: number; start_seconds: number; end_seconds: number; description: string; hook: string; score: number; status: string };
 const api = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 async function apiFetch(url: string, options: RequestInit = {}) {
@@ -33,7 +33,29 @@ export default function Home() {
   const discover = async (event: FormEvent) => { event.preventDefault(); setError(""); const result = await apiFetch(`${api}/api/v1/discovery/search?platform=youtube&query=${encodeURIComponent(query)}`, { method: "POST" }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Discovery failed"); else { setMessage(`${body.created} new sources recorded by ${body.provider}.`); refresh(); } };
   const upload = async (event: FormEvent) => { event.preventDefault(); if (!file) return; const form = new FormData(); form.append("file", file); form.append("title", title); const result = await apiFetch(`${api}/api/v1/sources/upload`, { method: "POST", body: form }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Upload failed"); else { setSelectedSource(body.source_id); setMessage(`Upload accepted as source ${body.source_id}. Add rights approval before processing.`); refresh(); } };
   const approveRights = async () => { if (!selectedSource) return; const result = await apiFetch(`${api}/api/v1/sources/${selectedSource}/rights`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ authorization_type: "owned", commercial_use: true, publishing_allowed: true, allowed_platforms: ["youtube"], evidence: "Original locally generated test media; operator-approved." }) }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Rights approval failed"); else { setMessage(`Rights approved for source ${body.source_id}.`); refresh(); } };
-  const process = async () => { if (!selectedSource) return; setMessage("Processing: ingesting, transcribing, ranking, and rendering…"); const result = await apiFetch(`${api}/api/v1/sources/${selectedSource}/process`, { method: "POST" }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Processing failed"); else { setMessage(`${body.clips_generated} clips rendered from ${body.transcript_segments} transcript segments.`); refresh(); } };
+  const process = async () => {
+    if (!selectedSource) return;
+    setError("");
+    setMessage("Queuing processing…");
+    try {
+      const response = await apiFetch(`${api}/api/v1/sources/${selectedSource}/process`, { method: "POST" });
+      const queued = await response.json();
+      if (!response.ok) throw new Error(queued.detail ?? "Processing failed");
+      for (;;) {
+        const statusResponse = await apiFetch(`${api}/api/v1/jobs/${queued.job_id}`);
+        const job = await statusResponse.json();
+        if (!statusResponse.ok) throw new Error(job.detail ?? "Could not check job status");
+        setMessage(`Processing: ${job.status}`);
+        if (job.status === "failed") { await refresh(); throw new Error(job.last_error ?? "Processing failed"); }
+        if (job.status === "succeeded") {
+          setMessage(`${job.result.clips_generated} clips rendered from ${job.result.transcript_segments} transcript segments.`);
+          await refresh();
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    } catch (error) { setError(error instanceof Error ? error.message : "Processing failed"); }
+  };
   const signIn = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);

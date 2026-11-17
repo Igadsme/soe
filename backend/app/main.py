@@ -5,6 +5,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from hashlib import sha256
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Literal
@@ -26,8 +27,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from redis.exceptions import RedisError
 from sqlalchemy import func, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from .auth import (
     development_bypass,
@@ -45,9 +47,9 @@ from .integrations import (
     YouTubeDataProvider,
 )
 from .logging_config import configure_logging
-from .media import ingest_authorized, render_vertical
 from .models import (
     Clip,
+    Job,
     LedgerEntry,
     MetricEvent,
     Publication,
@@ -55,11 +57,9 @@ from .models import (
     Source,
     WorkflowRun,
 )
-from .pipeline import extract_candidates
 from .rate_limit import redis_limited
 from .rights import can_ingest_and_publish, can_publish_to
 from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_media_path
-from .transcription import FasterWhisperTranscriber, TranscriptionUnavailable
 
 
 @asynccontextmanager
@@ -70,7 +70,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID"], expose_headers=["X-Request-ID"])
+app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"], expose_headers=["X-Request-ID"])
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -114,6 +114,13 @@ def limited(windows, key: str, limit: int) -> bool:
     return False
 
 
+async def request_limited(windows, key: str, limit: int) -> bool:
+    if settings.redis_url.strip():
+        return await run_in_threadpool(limited, windows, key, limit)
+    # Keep local window mutations serialized on the event loop.
+    return limited(windows, key, limit)
+
+
 @app.exception_handler(Exception)
 async def unhandled_error(request: Request, _exc: Exception):
     request_id = getattr(request.state, "request_id", uuid4().hex)
@@ -135,7 +142,7 @@ async def security_middleware(request: Request, call_next):
     request_id = supplied if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", supplied) else uuid4().hex
     request.state.request_id = request_id
     try:
-        if limited(_rate_windows, client_ip(request), settings.rate_limit_per_minute):
+        if await request_limited(_rate_windows, client_ip(request), settings.rate_limit_per_minute):
             response = JSONResponse({"detail": "rate limit exceeded"}, status_code=429, headers={"Retry-After": "60"})
         else:
             response = await call_next(request)
@@ -167,7 +174,11 @@ async def ready(db: Session = Depends(session)) -> dict:
         db.execute(text("SELECT 1"))
         from alembic.config import Config
         from alembic.script import ScriptDirectory
-        heads = set(ScriptDirectory.from_config(Config("alembic.ini")).get_heads())
+        package_parent = Path(__file__).resolve().parents[1]
+        root = package_parent if (package_parent / "backend" / "alembic").is_dir() else package_parent.parent
+        config = Config(str(root / "alembic.ini"))
+        config.set_main_option("script_location", str(root / "backend" / "alembic"))
+        heads = set(ScriptDirectory.from_config(config).get_heads())
         current = set(db.execute(text("SELECT version_num FROM alembic_version")).scalars())
         if current != heads:
             raise HTTPException(503, "database migrations are pending")
@@ -179,7 +190,7 @@ async def ready(db: Session = Depends(session)) -> dict:
 @app.post("/api/v1/auth/login")
 async def login(request: Request, username: str = Form(..., max_length=255), password: str = Form(..., max_length=1024)) -> JSONResponse:
     key = client_ip(request) + ":" + username.casefold()
-    if limited(_login_windows, key, 5) or limited(_login_windows, "ip:" + client_ip(request), 20):
+    if await request_limited(_login_windows, key, 5) or await request_limited(_login_windows, "ip:" + client_ip(request), 20):
         raise HTTPException(429, "login temporarily unavailable", headers={"Retry-After": "60"})
     if not settings.admin_password_hash and not settings.admin_password:
         if settings.demo_mode and settings.env == "development":
@@ -272,8 +283,8 @@ async def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, 
     return {"source_id": source_id, "status": source.status, "can_publish": can_ingest_and_publish(record)}
 
 
-@app.post("/api/v1/sources/{source_id}/process")
-async def process_source(source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+@app.post("/api/v1/sources/{source_id}/process", status_code=202)
+async def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
     source = db.get(Source, source_id)
     rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == source_id).order_by(RightsRecord.created_at.desc()))
     if not source or not rights:
@@ -287,37 +298,48 @@ async def process_source(source_id: int = PathParam(gt=0, le=2147483647), db: Se
         raise HTTPException(422, "invalid media path") from exc
     if not source.media_path or not Path(source.media_path).is_file():
         raise HTTPException(422, "source has no local authorized media path")
-    run = WorkflowRun(source_id=source.id, state="transcribing")
-    db.add(run)
-    db.commit()
+    raw_key = request.headers.get("Idempotency-Key")
+    if raw_key is not None and not 1 <= len(raw_key) <= 255:
+        raise HTTPException(422, "invalid idempotency key")
+    key = sha256(raw_key.encode()).hexdigest() if raw_key else None
+    existing = db.scalar(select(Job).where(Job.idempotency_key == key)) if key else None
+    if existing and existing.source_id != source_id:
+        raise HTTPException(409, "idempotency key already used")
+    existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+    if existing:
+        return JSONResponse({"job_id": existing.id, "status": existing.status}, status_code=200)
+    run = WorkflowRun(source_id=source_id, state="queued")
     try:
-        ingested, digest, metadata = ingest_authorized(source.media_path, Path(settings.media_root) / "ingested" / f"{source.id}-{Path(source.media_path).name}")
-        source.media_sha256 = digest
-        segments = FasterWhisperTranscriber(settings.whisper_model_size).transcribe(ingested)
-        candidates = extract_candidates(segments, limit=5)
-        for index, candidate in enumerate(candidates, 1):
-            clip_dir = Path(settings.media_root) / "clips"
-            subtitle = clip_dir / f"source-{source.id}-clip-{index}.srt"
-            output = clip_dir / f"source-{source.id}-clip-{index}.mp4"
-            subtitle.parent.mkdir(parents=True, exist_ok=True)
-            duration = max(1, int(candidate.end - candidate.start))
-            subtitle.write_text(f"1\n00:00:00,000 --> 00:00:{duration:02},000\n{candidate.description}\n", encoding="utf-8")
-            render_vertical(ingested, output, candidate.start, candidate.end, subtitle)
-            db.add(Clip(source_id=source.id, start_seconds=candidate.start, end_seconds=candidate.end, description=candidate.description, hook=candidate.hook, score=candidate.score, status="rendered", evidence=candidate.evidence, output_path=str(output), subtitle_path=str(subtitle)))
-        run.state = "edited"
-        source.status = "analyzed"
+        db.add(run)
+        db.flush()
+        job = Job(id=uuid4().hex, source_id=source_id, workflow_id=run.id, idempotency_key=key)
+        db.add(job)
         db.commit()
-        return {"workflow_id": run.id, "source_id": source.id, "state": run.state, "probe": metadata, "transcript_segments": len(segments), "clips_generated": len(candidates)}
-    except TranscriptionUnavailable as exc:
-        run.state = "failed"
-        run.error = str(exc)
-        db.commit()
-        raise HTTPException(503, "service temporarily unavailable") from exc
-    except Exception as exc:
-        run.state = "failed"
-        run.error = str(exc)
-        db.commit()
-        raise HTTPException(500, "processing failed") from exc
+    except IntegrityError:
+        db.rollback()
+        job = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+        if not job and key:
+            job = db.scalar(select(Job).where(Job.idempotency_key == key))
+        if not job or job.source_id != source_id:
+            raise HTTPException(409, "idempotency conflict") from None
+    return {"job_id": job.id, "status": job.status}
+
+
+def job_read(job: Job) -> dict:
+    return {name: getattr(job, name) for name in ("id", "kind", "source_id", "status", "attempts", "max_attempts", "run_after", "last_error", "result", "created_at", "updated_at")}
+
+
+@app.get("/api/v1/jobs")
+async def list_jobs(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
+    return [job_read(job) for job in db.scalars(select(Job).order_by(Job.created_at.desc()).limit(100))]
+
+
+@app.get("/api/v1/jobs/{job_id}")
+async def get_job(job_id: str, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    return job_read(job)
 
 
 @app.get("/api/v1/clips", response_model=list[ClipRead])
@@ -391,7 +413,7 @@ async def agents(db: Session = Depends(session), _: str = Depends(require_auth))
     queued = db.scalar(select(func.count()).select_from(WorkflowRun).where(WorkflowRun.state == "queued")) or 0
     live_discovery = bool(settings.youtube_api_key or (settings.twitch_client_id and settings.twitch_client_secret))
     return [{"name": name, "status": ("ready" if ready else "blocked"), "detail": detail, "queued_workflows": queued} for name, ready, detail in [
-        ("discovery", live_discovery or settings.demo_mode, "official adapters configured" if live_discovery else "fixture mode only"),
+        ("discovery", live_discovery or settings.demo_mode, "official adapters configured" if live_discovery else "fixture mode (development)" if settings.demo_mode else "blocked: no provider credentials configured"),
         ("rights", True, "fail-closed policy active"),
         ("perception", True, f"Faster-Whisper {settings.whisper_model_size} boundary available"),
         ("highlights", True, "evidence-backed ranking active"),

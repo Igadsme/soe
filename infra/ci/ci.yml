@@ -19,7 +19,7 @@ jobs:
       - run: pip install -r backend/requirements.txt
       - run: pip install -e ".[dev]"
       - run: ruff check backend/app
-      - run: PYTHONPATH=backend pytest -q backend/tests tests --cov=backend/app --cov-report=xml --cov-report=term-missing
+      - run: PYTHONPATH=backend pytest -q backend/tests tests --cov=backend/app --cov-fail-under=85 --cov-report=xml --cov-report=term-missing
       - run: pip-audit -r backend/requirements.txt
       - run: npm ci
         working-directory: frontend

@@ -164,7 +164,7 @@ async def test_readiness_requires_migration_head(client, isolated_database):
     assert (await client.get("/ready")).status_code == 503
     with isolated_database() as db:
         db.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0003_auth_sessions')"))
+        db.execute(text("INSERT INTO alembic_version VALUES ('0004_jobs')"))
         db.commit()
     assert (await client.get("/ready")).json() == {"status": "ready", "service": "soe-api"}
     with isolated_database() as db:
@@ -226,16 +226,11 @@ async def test_processing_rechecks_path_and_hides_errors(client, isolated_databa
         db.get(Source, source_id).media_path = str(media)
         db.commit()
 
-    def fail(*args, **kwargs):
-        raise RuntimeError("private processing detail")
-
-    monkeypatch.setattr(main, "ingest_authorized", fail)
     response = await client.post(f"/api/v1/sources/{source_id}/process", headers=headers)
-    assert response.status_code == 500
-    assert response.json() == {"detail": "processing failed"}
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
     with isolated_database() as db:
-        run = db.query(main.WorkflowRun).one()
-        assert run.state == "failed" and run.error == "private processing detail"
+        assert db.query(main.WorkflowRun).one().state == "queued"
 
 
 @pytest.mark.asyncio
