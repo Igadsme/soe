@@ -5,6 +5,10 @@
 ## Done
 
 - [x] Every application endpoint except login, `/health`, and `/ready` requires a session. Interactive API docs/OpenAPI routes are disabled. Development bypass requires explicit SOE_DEV_AUTH_BYPASS=true + development + loopback client + no password or hash; demo pipeline is development-only.
+- [x] Processing jobs use configurable `max(floor, k*duration)` deadlines, hard-kill timed media subprocesses, stop lease renewal at the deadline, and record/queue or terminal-fail the result.
+- [x] Source reruns are refused with 409 when any clip has a publication; publications use a clip foreign key and superseded unreferenced run folders are cleaned safely.
+- [x] Migrations align missing source FKs and nullability; fresh SQLite upgrade and `alembic check` report no pending operations.
+- [x] CI runs Postgres/Redis services, Alembic upgrade/check, 85% backend coverage, Ruff/pip-audit, frontend audit/typecheck/test/build, and production Compose builds.
 - [x] HMAC sessions contain random IDs backed by `auth_sessions` (new migration `0003_auth_sessions`). Logout revokes server-side; expiry and revocation are checked on every request. Previous stateless tokens are invalidated by the format change.
 - [x] HttpOnly session cookies, Secure in production/staging, SameSite=lax, Path=/; logout clears matching attributes. `/api/v1/auth/me` reports the current operator.
 - [x] All cookie-auth mutations except login require session-bound HMAC in the `soe_csrf` cookie and `X-CSRF-Token`. Frontend requests include credentials and the CSRF header; sign-in/out controls are available.

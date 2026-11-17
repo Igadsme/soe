@@ -111,3 +111,30 @@ The 401s come from the dashboard loading before sign-in. The 404 is `/favicon.ic
 
 ## Teardown
 `docker compose -p soeqa -f docker-compose.prod.yml down -v` removed only the `soeqa` containers, network and volumes.
+
+## 7. Production-readiness follow-up verification (2026-11-17)
+
+| PR | Topic | Local evidence |
+|---|---|---|
+| #11 | Login backoff, shared Redis client, backup encryption, metrics/private access | 140 passed, 3 skipped; 97.43% coverage; green GitHub CI |
+| #12 | P1-A processing deadlines and killable media subprocesses | 142 passed, 3 skipped; 96.77% coverage; Ruff/pip-audit passed; green GitHub CI |
+| #13 | P1-B rerun guard, publication FK, schema hardening and folder cleanup | 144 passed, 3 skipped; 96.67% coverage; green GitHub CI |
+| #14 | CI/Postgres/Redis/coverage and ingest copy reduction | 144 passed, 3 skipped; 96.90% coverage; frontend 22 Vitest tests/build passed; green GitHub CI |
+
+Relevant commands passed:
+
+```
+PYTHONPATH=backend pytest -q
+ruff check backend/app
+pip-audit -r backend/requirements.txt
+alembic upgrade head
+alembic check
+cd frontend && npm ci && npx vitest run && npm run build
+```
+
+## 8. NOT TESTED — local production Compose
+
+- Docker Desktop was started but its daemon became unavailable during the first full build.
+- Docker build output reported read-only Docker Desktop storage (`metadata_v2.db`/`containerdmeta.db`) and a restart readiness wait exceeded 165 seconds.
+- Therefore this work did **not** verify Caddy local TLS issuance, Compose migration/login/upload/process/download, 413 handling, Caddy metrics/privacy headers, backup restore, deploy/rollback, 401/0-byte/spoofed-XFF checks, or Docker image runtime behavior.
+- No cloud resources, deployments, real credentials, real media, or real user data were used.
