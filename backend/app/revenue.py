@@ -16,7 +16,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -54,16 +54,15 @@ class ManualEntry(BaseModel):
     source_id: int | None = Field(default=None, gt=0, le=2147483647)
     reference: str = Field(min_length=3, max_length=500)
 
-    @model_validator(mode="after")
-    def check(self):
+    def problems(self) -> str | None:
         allowed = REVENUE_CATEGORIES if self.kind == "revenue" else COST_CATEGORIES
         if self.category not in allowed:
-            raise ValueError(f"category must be one of {', '.join(allowed)}")
+            return f"category must be one of {', '.join(allowed)}"
         if self.provenance == "estimated" and self.kind == "revenue":
-            raise ValueError("estimated values may only be recorded as costs, never as revenue")
+            return "estimated values may only be recorded as costs, never as revenue"
         if self.period_start and self.period_end and self.period_end < self.period_start:
-            raise ValueError("period_end must not precede period_start")
-        return self
+            return "period_end must not precede period_start"
+        return None
 
 
 def day(value: date | None) -> datetime | None:
@@ -110,6 +109,8 @@ def revenue_summary(db: Session = Depends(session), _: str = Depends(require_aut
 
 @router.post("/entries", status_code=201)
 def create_entry(payload: ManualEntry, db: Session = Depends(session), actor: str = Depends(require_auth)) -> dict:
+    if problem := payload.problems():
+        raise HTTPException(422, problem)
     entry = LedgerEntry(kind=payload.kind, category=payload.category, cents=payload.cents, currency=payload.currency,
                         provenance=payload.provenance, verified=False, platform=payload.platform,
                         period_start=day(payload.period_start), period_end=day(payload.period_end),
@@ -154,7 +155,11 @@ def parse_rows(raw: bytes) -> list[dict]:
                                 currency=row["currency"].strip().upper(), platform=platform,
                                 period_start=date.fromisoformat(row["date"].strip()),
                                 period_end=date.fromisoformat(row["date"].strip()), reference=row["reference"].strip() or "imported row")
+            if problem := entry.problems():
+                raise ValueError(problem)
             rows.append(entry)
+        except ValidationError as exc:
+            errors.append(f"row {number}: " + "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())[:200])
         except (ValueError, TypeError) as exc:
             errors.append(f"row {number}: {str(exc).splitlines()[0][:160]}")
     if errors:
