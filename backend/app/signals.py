@@ -1,8 +1,8 @@
 """Cheap whole-source signals computed with FFmpeg + numpy (CPU only, bounded by timeouts and frame budgets).
 
 All classifications here are documented heuristics, not trained models:
-- audio windows are labeled silence / speech / tonal / burst from RMS energy, zero-crossing rate and
-  spectral flatness of a 16 kHz mono downmix;
+- audio windows are labeled silence / speech / tonal / burst from RMS energy, syllabic energy modulation,
+  spectral peak concentration, zero-crossing rate and spectral flatness of a 16 kHz mono downmix;
 - motion is mean absolute frame difference on low-resolution grayscale frames;
 - "speaker turns" are pause/energy-change boundaries between transcript segments, not diarization.
 """
@@ -61,16 +61,18 @@ def audio_profile(path: Path, hop: float = 0.5, max_seconds: float | None = None
     zcr = np.mean(np.abs(np.diff(np.signbit(frames).astype(np.int8), axis=1)), axis=1)
     spectrum = np.abs(np.fft.rfft(frames * np.hanning(size), axis=1)) + 1e-9
     flatness = np.exp(np.mean(np.log(spectrum), axis=1)) / np.mean(spectrum, axis=1)
+    power = spectrum ** 2
+    concentration = np.sort(power, axis=1)[:, -20:].sum(axis=1) / power.sum(axis=1)  # share of energy in 20 strongest bins
     # Syllabic modulation: speech energy fluctuates strongly across 50 ms sub-frames; tones and noise are steady.
     sub = frames.reshape(frames.shape[0], -1, int(0.05 * SAMPLE_RATE)) if size % int(0.05 * SAMPLE_RATE) == 0 else frames[:, None, :]
     sub_rms = np.sqrt(np.mean(sub ** 2, axis=2) + 1e-12)
     modulation = np.std(sub_rms, axis=1) / (np.mean(sub_rms, axis=1) + 1e-9)
     silence_floor = max(-45.0, float(np.median(db)) - 18)
     labels = []
-    for level, crossing, flat, mod in zip(db, zcr, flatness, modulation, strict=True):
+    for level, crossing, flat, mod, peak in zip(db, zcr, flatness, modulation, concentration, strict=True):
         if level < silence_floor:
             labels.append("silence")
-        elif flat < 0.02 and crossing < 0.2 and mod < 0.3:
+        elif peak > 0.8 and crossing < 0.3 and mod < 0.3:
             labels.append("tonal")  # stable narrowband: music notes, tones
         elif flat > 0.3 and mod < 0.35:
             labels.append("burst")  # steady broadband energy: crowd, impacts, effects
