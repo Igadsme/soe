@@ -40,9 +40,11 @@ class YouTubeDataProvider:
     @provider_errors
     async def search(self, query: str, max_results: int = 10) -> list[DiscoveredItem]:
         key = youtube_key()
-        params = {"part": "snippet", "q": query, "type": "video", "maxResults": max_results, "key": key}
+        params = {"part": "snippet", "q": query, "type": "video", "maxResults": max_results}
         async with metadata_client() as client:
-            response = await client.get("https://www.googleapis.com/youtube/v3/search", params=params)
+            # API key travels in the documented X-Goog-Api-Key header, never in the URL/query string.
+            response = await client.get("https://www.googleapis.com/youtube/v3/search", params=params,
+                                        headers={"X-Goog-Api-Key": key})
             response.raise_for_status()
             body = response.json()
         return [DiscoveredItem("youtube", row["id"]["videoId"], row["snippet"]["title"], f"https://www.youtube.com/watch?v={row['id']['videoId']}", row["snippet"]) for row in body.get("items", [])]
@@ -82,8 +84,9 @@ def youtube_key() -> str:
     return key
 
 
-async def youtube_items(client, resource: str, **params) -> list[dict]:
-    response = await client.get(f"https://www.googleapis.com/youtube/v3/{resource}", params=params)
+async def youtube_items(client, resource: str, *, key: str, **params) -> list[dict]:
+    response = await client.get(f"https://www.googleapis.com/youtube/v3/{resource}", params=params,
+                                headers={"X-Goog-Api-Key": key})
     response.raise_for_status()
     return response.json()["items"]
 
@@ -120,7 +123,8 @@ class YouTubeDiscovery(YouTubeDataProvider):
 async def twitch_headers(client) -> dict[str, str]:
     if not settings.twitch_client_id or not secret_value(settings.twitch_client_secret).strip():
         raise ProviderNotConfigured("Twitch Helix is not configured")
-    response = await client.post("https://id.twitch.tv/oauth2/token", params={
+    # Client secret goes in the form-encoded POST body (not the query string) so it never appears in URLs/logs.
+    response = await client.post("https://id.twitch.tv/oauth2/token", data={
         "client_id": settings.twitch_client_id, "client_secret": secret_value(settings.twitch_client_secret),
         "grant_type": "client_credentials",
     })
