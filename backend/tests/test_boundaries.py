@@ -61,9 +61,11 @@ def test_ingest_render_and_scene(monkeypatch, tmp_path):
     monkeypatch.setattr(media, 'run_media_command', run)
     output = tmp_path/'output.mp4'
     media.render_vertical(source, output, 1, 4, tmp_path/'captions.srt')
-    assert commands[0][:6] == ['/ffmpeg', '-y', '-ss', '1', '-to', '4']
-    assert 'subtitles=' in commands[0][commands[0].index('-vf')+1]
-    assert '+faststart' in commands[0] and 'loudnorm=' in ' '.join(commands[0])
+    # Two-pass loudness: a measurement pass precedes the render (no measurement JSON here, so single-pass fallback).
+    assert 'print_format=json' in ' '.join(commands[0])
+    assert commands[1][:6] == ['/ffmpeg', '-y', '-ss', '1', '-to', '4']
+    assert 'subtitles=' in commands[1][commands[1].index('-vf')+1]
+    assert '+faststart' in commands[1] and 'loudnorm=' in ' '.join(commands[1]) and 'measured_I' not in ' '.join(commands[1])
     assert media.detect_scene_boundaries(source) == [12, 20]
     for start, end in [(2, 1), (0, 10000)]:
         with pytest.raises(media.MediaProcessingError): media.render_vertical(source, output, start, end)

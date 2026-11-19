@@ -1,6 +1,7 @@
 """Authorized local media handling and FFmpeg-backed render validation."""
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -102,14 +103,41 @@ def ingest_authorized(source_path: str, destination: Path) -> tuple[Path, str, M
     return destination, digest, metadata
 
 
-def render_vertical(source: Path, output: Path, start: float, end: float, subtitle_file: Path | None = None) -> Path:
+def measure_loudness(source: Path, start: float, end: float, target: float) -> dict | None:
+    """First loudnorm pass: measure integrated loudness, true peak, LRA and threshold of the clip's audio."""
+    result = run_media_command([_binary("ffmpeg"), "-hide_banner", "-nostdin", "-ss", str(start), "-to", str(end), "-i", str(source),
+                                "-map", "0:a:0?", "-vn", "-af", f"loudnorm=I={target}:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"],
+                               settings.ffmpeg_timeout_seconds)
+    match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", result.stderr)
+    if not match:
+        return None
+    values = json.loads(match[0])
+    try:
+        if not math.isfinite(float(values["input_i"])) or float(values["input_i"]) < -70:
+            return None  # silence: nothing to normalize
+    except (KeyError, ValueError):
+        return None
+    return values
+
+
+def render_vertical(source: Path, output: Path, start: float, end: float, subtitle_file: Path | None = None,
+                    template=None, crop_center: float | None = None, two_pass: bool = True) -> Path:
+    from . import templates
     if end <= start or end - start > settings.max_clip_seconds:
         raise MediaProcessingError("clip duration is invalid")
     output.parent.mkdir(parents=True, exist_ok=True)
-    vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1"
-    if subtitle_file:
-        vf += f",subtitles={subtitle_file.as_posix()}"
-    run_media_command([_binary("ffmpeg"), "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", str(output)], settings.ffmpeg_timeout_seconds)
+    template = template or templates.get(settings.edit_template)
+    vf = templates.video_filter(template, crop_center, subtitle_file)
+    target = settings.loudness_target_lufs
+    audio_filter = f"loudnorm=I={target}:TP=-1.5:LRA=11"
+    measured = measure_loudness(source, start, end, target) if two_pass else None
+    if measured:
+        audio_filter += (f":measured_I={measured['input_i']}:measured_TP={measured['input_tp']}:measured_LRA={measured['input_lra']}"
+                         f":measured_thresh={measured['input_thresh']}:offset={measured['target_offset']}:linear=true")
+    # loudnorm upsamples internally; resample back to 48 kHz for platform-friendly AAC.
+    run_media_command([_binary("ffmpeg"), "-y", "-ss", str(start), "-to", str(end), "-i", str(source), "-vf", vf,
+                       "-af", audio_filter + ",aresample=48000", "-c:v", "libx264", "-c:a", "aac", "-b:a", "160k",
+                       "-movflags", "+faststart", str(output)], settings.ffmpeg_timeout_seconds)
     if not output.is_file() or output.stat().st_size == 0:
         raise MediaProcessingError("FFmpeg did not produce a usable output")
     return output

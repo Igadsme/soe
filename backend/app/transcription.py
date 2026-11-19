@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from .config import settings
-from .pipeline import TranscriptSegment
+from .pipeline import TranscriptSegment, Word
 
 
 class TranscriptionUnavailable(RuntimeError):
@@ -19,4 +19,6 @@ class FasterWhisperTranscriber:
 
     def transcribe(self, media_path: Path) -> list[TranscriptSegment]:
         segments, _ = self.model.transcribe(str(media_path), word_timestamps=True)
-        return [TranscriptSegment(float(item.start), float(item.end), item.text.strip()) for item in segments if item.text.strip()]
+        return [TranscriptSegment(float(item.start), float(item.end), item.text.strip(),
+                                  tuple(Word(float(w.start), float(w.end), w.word.strip()) for w in (getattr(item, "words", None) or []) if w.word.strip()))
+                for item in segments if item.text.strip()]

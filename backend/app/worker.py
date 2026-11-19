@@ -13,7 +13,8 @@ from uuid import uuid4
 
 from sqlalchemy import delete, func, or_, select, update
 
-from . import analytics_jobs, scheduler
+from . import analytics_jobs, scheduler, templates
+from . import signals as source_signals
 from .audit import audit
 from .automation import (
     PROCESSING_CATEGORY,
@@ -59,12 +60,13 @@ from .models import (
     now,
 )
 from .observability import JOB_DEADLINE_EXCEEDED, JOB_RECLAIMED
-from .pipeline import extract_candidates
+from .pipeline import extract_candidates_v2 as extract_candidates
 from .publication_worker import PublisherJob
 from .publications import latest_rights, lock_source, recover_expired
 from .publishing import PublishingUnavailable, utc
 from .rights import can_ingest_and_publish
 from .schemas import safe_media_path
+from .subtitles import build_cues, timed_words, write_ass, write_srt
 from .transcription import FasterWhisperTranscriber
 
 logger = logging.getLogger(__name__)
@@ -172,22 +174,48 @@ def cleanup_unreferenced_output_folders(source_id: int, keep_workflow_id: int) -
     return removed
 
 
+def analyze_signals(path: Path, metadata):
+    """Stage 1 signals are best-effort: a failure falls back to transcript-only ranking, recorded in evidence."""
+    try:
+        return source_signals.analyze(path, metadata.duration, metadata.has_audio), None
+    except Exception as exc:  # noqa: BLE001 - FFmpeg/numpy failure must not block transcript-based clipping
+        return None, type(exc).__name__
+
+
 def render_source(media_path: str, workspace: Path, limit: int, expected_duration: float | None) -> dict:
     ingested, digest, metadata = ingest_authorized(media_path, workspace / "input.mp4")
     if expected_duration is not None and metadata.duration != expected_duration:
         raise ValueError("source duration changed during admission")
-    segments = FasterWhisperTranscriber(settings.whisper_model_size).transcribe(ingested)
-    candidates = extract_candidates(segments, limit=limit)
+    sig, signal_error = analyze_signals(ingested, metadata)
+    segments = FasterWhisperTranscriber(settings.whisper_model_size).transcribe(ingested) if metadata.has_audio else []
+    candidates = extract_candidates(segments, sig, limit=limit, min_seconds=settings.highlight_min_seconds,
+                                       max_seconds=min(settings.max_clip_seconds, settings.highlight_target_max_seconds),
+                                       duration=metadata.duration)
+    template = templates.get(settings.edit_template)
     clips = []
     for index, candidate in enumerate(candidates, 1):
         subtitle = workspace / f"clip-{index}.srt"
+        styled = workspace / f"clip-{index}.ass"
         output = workspace / f"clip-{index}.mp4"
-        render_subtitle(subtitle, candidate.end - candidate.start, candidate.description)
-        render_vertical(ingested, output, candidate.start, candidate.end, subtitle)
+        length = candidate.end - candidate.start
+        words = timed_words([s for s in segments if getattr(s, "end", 0) > candidate.start and getattr(s, "start", 0) < candidate.end],
+                            candidate.start, candidate.end)
+        cues = build_cues(words, length)
+        if not cues:
+            render_subtitle(subtitle, length, candidate.description)
+        else:
+            write_srt(subtitle, cues)
+        write_ass(styled, cues or [], template, length, settings.brand_text)
+        crop = sig.motion.action_center(candidate.start, candidate.end) if sig is not None and sig.motion else None
+        render_vertical(ingested, output, candidate.start, candidate.end, styled if cues or settings.brand_text else subtitle,
+                        template, crop)
+        evidence = {**candidate.evidence, "template": template.name, "crop_center": round(crop, 3) if crop is not None else None,
+                    "subtitle_cues": len(cues), "word_timestamps": any(getattr(s, "words", ()) for s in segments)}
         clips.append({"start_seconds": candidate.start, "end_seconds": candidate.end,
                       "description": candidate.description, "hook": candidate.hook, "score": candidate.score,
-                      "evidence": candidate.evidence, "output_path": str(output), "subtitle_path": str(subtitle)})
-    return {"probe": asdict(metadata), "digest": digest, "transcript_segments": len(segments), "clips": clips}
+                      "evidence": evidence, "output_path": str(output), "subtitle_path": str(subtitle)})
+    return {"probe": asdict(metadata), "digest": digest, "transcript_segments": len(segments), "clips": clips,
+            "signals": sig.summary() if sig is not None else {"unavailable": signal_error}}
 
 
 def source_inputs(job_id: str, worker_id: str):
@@ -377,7 +405,7 @@ async def execute_qc(job_id, worker_id, snapshot):
             if not clip or clip.status != "qc_pending":
                 continue
             reasons = result["reasons"]
-            clip.evidence = {**clip.evidence, "qc_reasons": reasons, "qc_sha256": result["sha256"]}
+            clip.evidence = {**clip.evidence, "qc_reasons": reasons, "qc_sha256": result["sha256"], "qc_metrics": result.get("metrics", {})}
             if reasons:
                 clip.status = "qc_failed"
                 failures += 1

@@ -11,12 +11,21 @@ from pathlib import Path
 
 from .config import settings
 from .media import MediaProcessingError, _binary, probe, run_media_command, sha256_file
-from .subtitles import srt_timestamp
+from .subtitles import (
+    build_cues,
+    distribute,
+    parse_srt,
+    readability_violations,
+    write_srt,
+)
 
 _MEDIA_SETTINGS = (
     "ffmpeg_timeout_seconds", "max_source_seconds", "max_upload_bytes", "max_clip_seconds",
-    "whisper_cache_dir", "whisper_model_size", "qc_min_clip_seconds", "qc_min_mean_db",
+    "whisper_cache_dir", "whisper_model_size", "qc_min_clip_seconds", "qc_min_mean_db", "loudness_target_lufs",
+    "edit_template", "brand_text", "signal_sample_fps", "signal_max_frames_per_hour", "highlight_min_seconds",
+    "highlight_target_max_seconds",
 )
+LOUDNESS_TOLERANCE_LU = 2.0
 CUE = re.compile(r"(\d{2,}:\d{2}:\d{2},\d{3}) --> (\d{2,}:\d{2}:\d{2},\d{3})")
 
 
@@ -32,6 +41,7 @@ def timestamp_ms(value: str) -> int:
 def check_clip(item: dict, source_has_audio: bool) -> dict:
     output, subtitle = Path(item["output"]), Path(item["subtitle"])
     reasons = []
+    item_metrics: dict = {}
     duration_ms = 0
     digest = None
     try:
@@ -46,12 +56,22 @@ def check_clip(item: dict, source_has_audio: bool) -> dict:
                 reasons.append("duration_out_of_range")
             if source_has_audio and not metadata.has_audio:
                 reasons.append("missing_audio")
-            if metadata.has_audio:
-                result = run_media_command([_binary("ffmpeg"), "-hide_banner", "-nostdin", "-i", str(output),
-                    "-map", "0:a:0", "-af", "volumedetect", "-vn", "-f", "null", "-"], settings.ffmpeg_timeout_seconds)
-                volume = re.search(r"mean_volume:\s*(-?[\d.]+) dB", result.stderr)
-                if not volume or float(volume[1]) < settings.qc_min_mean_db:
-                    reasons.append("audio_below_loudness_floor")
+            metrics = analyze_output(output, metadata.has_audio)
+            item_metrics.update(metrics)
+            if metadata.has_audio and (metrics.get("mean_volume_db") is None or metrics["mean_volume_db"] < settings.qc_min_mean_db):
+                reasons.append("audio_below_loudness_floor")
+            if metrics["black_ratio"] > 0.5:
+                reasons.append("mostly_black_video")
+            silent = not metadata.has_audio or metrics["silence_ratio"] >= 0.8
+            if metrics["freeze_ratio"] >= 0.95 and silent:
+                reasons.append("frozen_and_silent")  # a still frame alone is legitimate (slides, podcasts)
+            if metadata.has_audio and source_has_audio and metrics["silence_ratio"] >= 0.8:
+                reasons.append("mostly_silent_audio")
+            loudness = metrics.get("integrated_lufs")
+            if metadata.has_audio and loudness is not None and loudness > -70 and metrics["silence_ratio"] < 0.8 \
+                    and abs(loudness - settings.loudness_target_lufs) > LOUDNESS_TOLERANCE_LU:
+                # Advisory: platforms re-normalize playback loudness, so this warns instead of blocking.
+                item_metrics.setdefault("warnings", []).append("loudness_out_of_tolerance")
             digest = sha256_file(output)
     except (MediaProcessingError, OSError, ValueError, KeyError, OverflowError):
         reasons.append("media_probe_failed")
@@ -68,9 +88,43 @@ def check_clip(item: dict, source_has_audio: bool) -> dict:
             if not 0 <= start < end <= duration_ms:
                 reasons.append("subtitle_cue_out_of_range")
                 break
+        else:
+            problems = readability_violations(parse_srt(subtitle.read_text(encoding="utf-8")), duration_ms / 1000)
+            item_metrics["subtitle_readability"] = problems
+            if problems:
+                reasons.append("subtitle_readability")
     except (OSError, UnicodeError):
         reasons.append("missing_or_unreadable_subtitles")
-    return {"clip_id": item["clip_id"], "reasons": reasons, "sha256": digest}
+    return {"clip_id": item["clip_id"], "reasons": reasons, "sha256": digest, "metrics": item_metrics}
+
+
+def _sum(pattern: str, text: str) -> float:
+    return sum(float(value) for value in re.findall(pattern, text))
+
+
+def analyze_output(output: Path, has_audio: bool) -> dict:
+    """One FFmpeg pass: blackdetect + freezedetect on video; volumedetect, silencedetect and EBU R128 on audio."""
+    argv = [_binary("ffmpeg"), "-hide_banner", "-nostdin", "-i", str(output), "-map", "0:v:0",
+            "-vf", "blackdetect=d=0.5:pix_th=0.10,freezedetect=n=0.003:d=1"]
+    if has_audio:
+        argv += ["-map", "0:a:0", "-af", "volumedetect,silencedetect=n=-50dB:d=0.5,ebur128=framelog=quiet"]
+    result = run_media_command(argv + ["-f", "null", "-"], settings.ffmpeg_timeout_seconds)
+    log = result.stderr
+    duration = probe(output, require_ffprobe=True).duration or 1.0
+    freeze = _sum(r"freeze_duration: ([\d.]+)", log)
+    if "freeze_start" in log and "freeze_end" not in log.split("freeze_start")[-1]:
+        last = float(re.findall(r"freeze_start: ([\d.]+)", log)[-1])
+        freeze += duration - last  # freeze ran to the end of the clip
+    silence = _sum(r"silence_duration: ([\d.]+)", log)
+    if has_audio and "silence_start" in log and "silence_end" not in log.split("silence_start")[-1]:
+        silence += duration - float(re.findall(r"silence_start: (-?[\d.]+)", log)[-1])
+    volume = re.search(r"mean_volume:\s*(-?[\d.]+) dB", log)
+    integrated = re.findall(r"I:\s+(-?[\d.]+) LUFS", log)
+    return {"black_ratio": round(min(1.0, _sum(r"black_duration:([\d.]+)", log) / duration), 3),
+            "freeze_ratio": round(min(1.0, freeze / duration), 3),
+            "silence_ratio": round(min(1.0, silence / duration), 3) if has_audio else 1.0,
+            "mean_volume_db": float(volume[1]) if volume else None,
+            "integrated_lufs": float(integrated[-1]) if integrated else None}
 
 
 def probe_source(media_path: str) -> dict:
@@ -143,7 +197,9 @@ async def run_media_task(target, args, result_file: Path):
 
 
 def render_subtitle(path: Path, duration: float, text: str) -> None:
-    path.write_text(f"1\n00:00:00,000 --> {srt_timestamp(duration)}\n{' '.join(text.split())}\n", encoding="utf-8")
+    """Readable cues for operator-edited text without word timings (times distributed by word length)."""
+    words = distribute(0.0, max(duration - 0.05, 0.1), " ".join(text.split()))
+    write_srt(path, build_cues(words, duration) if words else [])
 
 
 def render_single(source: str, output: str, subtitle: str, start: float, end: float, text: str) -> dict:
