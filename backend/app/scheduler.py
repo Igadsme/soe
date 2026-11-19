@@ -129,7 +129,7 @@ def schedule_discovery(db, timestamp):
 
 
 def schedule_processing(db, policy, timestamp):
-    count = db.scalar(select(func.count()).select_from(Job).where(Job.kind.in_(("process_source", "quality_check")),
+    count = db.scalar(select(func.count()).select_from(Job).where(Job.kind.in_(("process_source", "render_clip", "quality_check")),
                                                                 Job.status.in_(ACTIVE)))
     capacity = policy.max_concurrent_processing_jobs - count if policy.auto_process_authorized else 0
     budget_open = can_afford(policy, budget_used(db, timestamp), int(settings.processing_cents_per_minute > 0))

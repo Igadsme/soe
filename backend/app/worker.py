@@ -38,7 +38,13 @@ from .job_control import (
     settle_interrupted,
 )
 from .media import ingest_authorized, render_vertical
-from .media_tasks import probe_source, quality_check, render_subtitle, run_media_task
+from .media_tasks import (
+    probe_source,
+    quality_check,
+    render_single,
+    render_subtitle,
+    run_media_task,
+)
 from .models import (
     AuthSession,
     Clip,
@@ -304,6 +310,51 @@ async def execute_media(job_id, worker_id):
             shutil.rmtree(workspace, ignore_errors=True)
 
 
+async def execute_render_clip(job_id, worker_id, snapshot):
+    payload = snapshot.payload or {}
+    with SessionLocal() as db:
+        clip = db.get(Clip, payload.get("clip_id"))
+        source = db.get(Source, snapshot.source_id)
+        rights = latest_rights(db, snapshot.source_id)
+        if (not clip or not source or not rights or not can_ingest_and_publish(rights)
+                or source.media_revision != payload.get("media_revision", 0)):
+            raise ValueError("processing authorization unavailable")
+        previous = Path(safe_media_path(clip.output_path)) if clip.output_path else None
+        ingested = previous.parent / "input.mp4" if previous and (previous.parent / "input.mp4").is_file() else None
+        media_input = str(ingested or safe_media_path(source.media_path or ""))
+        folder = previous.parent if previous else job_workspace(source.id, 0, "rerender")
+        description = clip.description
+    attempt = uuid4().hex[:8]
+    output = folder / f"clip-{clip.id}-r{attempt}.mp4"
+    subtitle = folder / f"clip-{clip.id}-r{attempt}.srt"
+    start, end = float(payload["start_seconds"]), float(payload["end_seconds"])
+    try:
+        with TemporaryDirectory() as result_dir:
+            result = await run_media_task(render_single, (media_input, str(output), str(subtitle), start, end, description),
+                                          Path(result_dir) / "result.json")
+        with SessionLocal() as db:
+            job = lock_claim(db, job_id, worker_id)
+            if not job or (job.deadline_at and utc(job.deadline_at) <= now()):
+                raise ValueError("render claim lost")
+            clip = db.get(Clip, payload["clip_id"])
+            old = (clip.output_path, clip.subtitle_path)
+            clip.start_seconds, clip.end_seconds = start, end
+            clip.output_path, clip.subtitle_path = str(output), str(subtitle)
+            clip.status = "qc_pending"
+            clip.evidence = {**(clip.evidence or {}), "job_id": job.id, "edited_bounds": [start, end]}
+            qc = scheduler.enqueue(db, "quality_check", key=f"qc:{job.id}", source_id=job.source_id,
+                                   payload={"render_job_id": job.id, "source_has_audio": result["has_audio"]})
+            finish_success(job, {"clip_id": clip.id, "quality_check_job_id": qc.id})
+            db.commit()
+        for path in old:
+            if path and Path(path).resolve() != output.resolve():
+                Path(path).unlink(missing_ok=True)
+    except BaseException:
+        output.unlink(missing_ok=True)
+        subtitle.unlink(missing_ok=True)
+        raise
+
+
 async def execute_qc(job_id, worker_id, snapshot):
     payload = snapshot.payload
     with SessionLocal() as db:
@@ -428,6 +479,8 @@ async def process_once() -> int:
         work = execute_media(job_id, worker_id)
     elif job.kind == "quality_check":
         work = execute_qc(job_id, worker_id, job)
+    elif job.kind == "render_clip":
+        work = execute_render_clip(job_id, worker_id, job)
     else:
         work = execute_metadata(job_id, worker_id, job)
 

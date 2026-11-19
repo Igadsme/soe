@@ -51,6 +51,7 @@ from .integrations import (
     TwitchHelixProvider,
     YouTubeDataProvider,
 )
+from .library_routes import router as library_router
 from .logging_config import configure_logging
 from .models import (
     Clip,
@@ -90,6 +91,7 @@ app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in setti
 app.include_router(oauth_router)
 app.include_router(publication_router)
 app.include_router(automation_router)
+app.include_router(library_router)
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -400,11 +402,13 @@ def list_clips(db: Session = Depends(session), _: str = Depends(require_auth)) -
 
 
 @app.get("/api/v1/clips/{clip_id}/download")
-def download_clip(clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
+def download_clip(clip_id: int = PathParam(gt=0, le=2147483647), inline: bool = False, db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
     clip = db.get(Clip, clip_id)
     if not clip or not clip.output_path or not Path(clip.output_path).is_file():
         raise HTTPException(404, "rendered clip not found")
-    return FileResponse(clip.output_path, media_type="video/mp4", filename=Path(clip.output_path).name)
+    # Range requests (seeking in <video>) are served by FileResponse; inline disposition enables previews.
+    return FileResponse(clip.output_path, media_type="video/mp4", filename=Path(clip.output_path).name,
+                        content_disposition_type="inline" if inline else "attachment")
 
 
 @app.post("/api/v1/discovery/search")

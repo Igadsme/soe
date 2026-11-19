@@ -26,6 +26,7 @@ from .automation import (
 )
 from .config import settings
 from .db import session
+from .job_control import release_render_clip
 from .models import (
     AuditEvent,
     AutomationPolicy,
@@ -44,7 +45,7 @@ from .schemas import safe_media_path
 
 router = APIRouter(prefix="/api/v1")
 JobStatus = Literal["queued", "running", "cancel_requested", "succeeded", "failed", "dead_letter", "cancelled"]
-JobKind = Literal["process_source", "quality_check", "discovery", "publish", "analytics", "optimize"]
+JobKind = Literal["process_source", "render_clip", "quality_check", "discovery", "publish", "analytics", "optimize"]
 
 
 def job_read(job: Job) -> dict:
@@ -87,6 +88,7 @@ def cancel_job(job_id: str, db: Session = Depends(session), actor: str = Depends
     if job.status == "queued":
         job.status, job.wait_reason = "cancelled", None
         update_workflow(db, job, "cancelled")
+        release_render_clip(db, job)
         if job.kind == "publish":
             publication = db.get(Publication, job.publication_id)
             publication.next_attempt_at = None

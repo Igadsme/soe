@@ -75,6 +75,7 @@ class ClipRead(Highlight):
     id: int
     source_id: int
     status: str
+    created_at: datetime | None = None
     output_path: str | None = None
     subtitle_path: str | None = None
     model_config = ConfigDict(from_attributes=True)

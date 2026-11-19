@@ -22,7 +22,7 @@ from .publishing import Platform, utc
 
 ACTIVE = ("queued", "running", "cancel_requested")
 TERMINAL = ("dead_letter", "failed", "cancelled")
-PROCESSING_KINDS = ("process_source", "quality_check")
+PROCESSING_KINDS = ("process_source", "render_clip", "quality_check")
 PROCESSING_CATEGORY = "processing_estimate"
 
 
@@ -167,6 +167,7 @@ def job_limits(kind: str) -> tuple[int, float]:
         "process_source": (3, settings.processing_deadline_floor_seconds),
         "publish": (settings.publishing_max_attempts, settings.publishing_deadline_seconds),
         "quality_check": (3, 300),
+        "render_clip": (3, max(300, settings.processing_deadline_floor_seconds)),
         "discovery": (3, 300),
         "analytics": (3, 60),
         "optimize": (2, 30),

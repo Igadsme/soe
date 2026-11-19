@@ -144,3 +144,12 @@ async def run_media_task(target, args, result_file: Path):
 
 def render_subtitle(path: Path, duration: float, text: str) -> None:
     path.write_text(f"1\n00:00:00,000 --> {srt_timestamp(duration)}\n{' '.join(text.split())}\n", encoding="utf-8")
+
+
+def render_single(source: str, output: str, subtitle: str, start: float, end: float, text: str) -> dict:
+    """Re-render one clip with operator-edited bounds (runs in the killable media child)."""
+    from .media import render_vertical
+    render_subtitle(Path(subtitle), end - start, text)
+    render_vertical(Path(source), Path(output), start, end, Path(subtitle))
+    metadata = probe(Path(output))
+    return {"has_audio": metadata.has_audio}

@@ -4,13 +4,21 @@ from datetime import timedelta
 from sqlalchemy import select, update
 
 from .automation import record_schedule_status, retry_delay, update_workflow
-from .models import Job, Publication, now
+from .models import Clip, Job, Publication, now
 from .publications import transition
 from .publishing import utc
 
 
 def clear_claim(job: Job) -> None:
     job.locked_by = job.lease_expires_at = job.deadline_at = job.interruption = None
+
+
+def release_render_clip(db, job: Job) -> None:
+    """A re-render that will not run again returns its clip to review with the previous output."""
+    if job.kind == "render_clip" and job.status != "queued":
+        clip = db.get(Clip, (job.payload or {}).get("clip_id", 0))
+        if clip and clip.status == "rendering":
+            clip.status = "pending_review"
 
 
 def settle_interrupted(db, job: Job) -> None:
@@ -28,6 +36,7 @@ def settle_interrupted(db, job: Job) -> None:
         publication.next_attempt_at = job.run_after if paused else None
         transition(db, publication, job.status, "worker")
     update_workflow(db, job, job.status)
+    release_render_clip(db, job)
     if job.kind == "discovery":
         record_schedule_status(db, job, job.wait_reason or job.status)
 
@@ -45,6 +54,7 @@ def retry_or_dead_letter(db, job: Job, error_class: str, last_error: str, *,
         seconds = retry_delay(job.attempts) if delay is None else delay
         job.run_after = now() + timedelta(seconds=seconds)
     update_workflow(db, job, "queued" if job.status == "queued" else "failed", last_error)
+    release_render_clip(db, job)
     if job.kind == "discovery":
         record_schedule_status(db, job, job.status)
 
