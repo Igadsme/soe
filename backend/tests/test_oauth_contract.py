@@ -130,14 +130,14 @@ def test_oauth_connect_and_revoke_contract(platform, oauth_config, isolated_data
             with isolated_database() as db:
                 pkce["verifier"] = db.get(OAuthState, state).code_verifier
             digest = base64.urlsafe_b64encode(sha256(pkce["verifier"].encode()).digest()).decode().rstrip("=")
-            assert query == {**base, "client_id": "google-fixture", "scope": " ".join(oauth.SCOPES["youtube"]),
+            assert query == {**base, "client_id": "google-fixture", "scope": " ".join(oauth.requested_scopes("youtube")),
                              "code_challenge": digest, "code_challenge_method": "S256", "access_type": "offline", "prompt": "consent"}
         elif platform == "tiktok":
             assert url.netloc + url.path == "www.tiktok.com/v2/auth/authorize/"
-            assert query == {**base, "client_key": "tiktok-fixture", "scope": "video.publish,user.info.basic"}
+            assert query == {**base, "client_key": "tiktok-fixture", "scope": ",".join(oauth.requested_scopes("tiktok"))}
         else:
             assert url.netloc + url.path == "www.facebook.com/v26.0/dialog/oauth"
-            assert query == {**base, "client_id": "meta-fixture", "scope": ",".join(oauth.SCOPES["instagram"])}
+            assert query == {**base, "client_id": "meta-fixture", "scope": ",".join(oauth.requested_scopes("instagram"))}
         route = f"/api/v1/oauth/{platform}/callback"
         result = client.get(route, params={"state": state, "code": CODE}, follow_redirects=False)
         assert result.status_code == 303

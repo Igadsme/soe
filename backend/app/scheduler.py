@@ -10,6 +10,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from sqlalchemy import exists, func, select
 
+from . import analytics_jobs
 from .analytics_jobs import duration_band
 from .automation import (
     ACTIVE,
@@ -23,6 +24,7 @@ from .automation import (
 from .config import settings
 from .integrations import DiscoveredItem, TwitchDiscovery, YouTubeDiscovery
 from .models import (
+    AnalyticsCollection,
     Clip,
     ConnectedAccount,
     DiscoverySchedule,
@@ -209,10 +211,13 @@ def schedule_publications(db, policy: Policy, timestamp):
 
 
 def schedule_analytics(db, timestamp):
-    interval = settings.analytics_interval_minutes * 60
-    window = int(timestamp.timestamp()) // interval
+    """Collect each publication once per due window (initial, 1h, 24h, 72h, 7d, 28d after publish)."""
     rows = db.scalars(select(Publication).where(Publication.status == "succeeded", Publication.published_at.is_not(None)))
     for row in rows:
+        window = analytics_jobs.due_window(row.published_at, timestamp)
+        if window is None or db.scalar(select(AnalyticsCollection.id).where(
+                AnalyticsCollection.publication_id == row.id, AnalyticsCollection.window == window)):
+            continue
         pending = db.scalar(select(Job.id).where(Job.kind == "analytics", Job.publication_id == row.id,
                                                   Job.status.in_(ACTIVE)).limit(1))
         if not pending:

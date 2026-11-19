@@ -27,6 +27,16 @@ SCOPES = {
     "tiktok": ("video.publish", "user.info.basic"),
     "instagram": ("instagram_basic", "instagram_content_publish", "pages_show_list", "pages_read_engagement"),
 }
+# Read-only analytics scopes: requested, never required. Without them analytics are recorded as unavailable.
+OPTIONAL_SCOPES = {
+    "youtube": ("https://www.googleapis.com/auth/yt-analytics.readonly",),
+    "tiktok": ("video.list",),
+    "instagram": ("instagram_manage_insights",),
+}
+
+
+def requested_scopes(platform: str) -> tuple[str, ...]:
+    return SCOPES[platform] + OPTIONAL_SCOPES[platform]
 
 
 @dataclass(frozen=True)
@@ -54,17 +64,17 @@ def authorize(platform: str, state: str) -> tuple[str, str | None]:
         endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
         verifier = secrets.token_urlsafe(64)
         digest = base64.urlsafe_b64encode(sha256(verifier.encode()).digest()).decode().rstrip("=")
-        params.update(client_id=identifier, scope=" ".join(SCOPES[platform]), code_challenge=digest,
+        params.update(client_id=identifier, scope=" ".join(requested_scopes(platform)), code_challenge=digest,
                       code_challenge_method="S256", access_type="offline", prompt="consent")
     elif platform == "tiktok":
         # https://developers.tiktok.com/docs/en/login-kit-overview
         # TikTok's confidential Web client uses state. Its PKCE contract is for desktop/mobile.
         endpoint = "https://www.tiktok.com/v2/auth/authorize/"
-        params.update(client_key=identifier, scope=",".join(SCOPES[platform]))
+        params.update(client_key=identifier, scope=",".join(requested_scopes(platform)))
     else:
         # https://developers.facebook.com/docs/facebook-login/guides/advanced/manual-flow/
         endpoint = f"https://www.facebook.com/{settings.meta_graph_version}/dialog/oauth"
-        params.update(client_id=identifier, scope=",".join(SCOPES[platform]))
+        params.update(client_id=identifier, scope=",".join(requested_scopes(platform)))
     return f"{endpoint}?{urlencode(params)}", verifier
 
 

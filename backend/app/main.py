@@ -31,6 +31,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from . import analytics_routes
+from . import revenue as revenue_routes
 from .audit import audit
 from .auth import (
     csrf_token,
@@ -86,12 +88,14 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"], expose_headers=["X-Request-ID"])
+app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"], expose_headers=["X-Request-ID"])
 
 app.include_router(oauth_router)
 app.include_router(publication_router)
 app.include_router(automation_router)
 app.include_router(library_router)
+app.include_router(revenue_routes.router)
+app.include_router(analytics_routes.router)
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -281,9 +285,10 @@ def overview(db: Session = Depends(session), _: str = Depends(require_auth)) -> 
     counts = {}
     for label, model in (("sources", Source), ("clips", Clip), ("workflows", WorkflowRun)):
         counts[label] = db.scalar(select(func.count()).select_from(model)) or 0
-    revenue = db.scalar(select(func.coalesce(func.sum(LedgerEntry.cents), 0)).where(LedgerEntry.kind == "revenue", LedgerEntry.verified.is_(True))) or 0
-    expenses = db.scalar(select(func.coalesce(func.sum(LedgerEntry.cents), 0)).where(LedgerEntry.kind == "expense", LedgerEntry.verified.is_(True))) or 0
-    return {"environment": settings.env, "demo_mode": settings.demo_mode, "counts": counts, "revenue_cents": revenue, "expense_cents": expenses}
+    summary = revenue_routes.summarize(list(db.scalars(select(LedgerEntry))))
+    return {"environment": settings.env, "demo_mode": settings.demo_mode, "counts": counts,
+            "revenue_cents": summary["revenue_cents"]["total"], "expense_cents": summary["cost_cents"]["actual"],
+            "estimated_cost_cents": summary["cost_cents"]["estimated"], "revenue": summary}
 
 
 @app.post("/api/v1/sources/upload")
@@ -439,8 +444,8 @@ def analytics(db: Session = Depends(session), _: str = Depends(require_auth)) ->
 
 @app.get("/api/v1/revenue")
 def revenue(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
-    entries = list(db.scalars(select(LedgerEntry).order_by(LedgerEntry.created_at.desc())).all())
-    return {"entries": [{"id": item.id, "kind": item.kind, "category": item.category, "cents": item.cents, "verified": item.verified, "note": item.note} for item in entries], "verified_only": True}
+    entries = list(db.scalars(select(LedgerEntry).order_by(LedgerEntry.created_at.desc(), LedgerEntry.id.desc())).all())
+    return {"entries": [revenue_routes.entry_read(item) for item in entries], "summary": revenue_routes.summarize(entries)}
 
 
 @app.get("/api/v1/agents")

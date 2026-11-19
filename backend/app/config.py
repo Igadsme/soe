@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     workflow_timeout_seconds: int = Field(default=21600, ge=60)
     scheduler_interval_seconds: int = Field(default=15, ge=1)
     analytics_interval_minutes: int = Field(default=1440, ge=1)
+    learner_min_samples: int = Field(default=30, ge=5, le=100000)
     processing_cents_per_minute: float = Field(default=1, ge=0, le=100000, allow_inf_nan=False)
     qc_min_clip_seconds: float = Field(default=1, gt=0)
     qc_min_mean_db: float = Field(default=-50, ge=-90, le=0)

@@ -46,6 +46,7 @@ from .media_tasks import (
     run_media_task,
 )
 from .models import (
+    AnalyticsCollection,
     AuthSession,
     Clip,
     DiscoverySchedule,
@@ -227,7 +228,7 @@ def reserve_processing(job_id, worker_id, source_id, duration):
         workflow = db.get(WorkflowRun, job.workflow_id)
         workflow.cost_cents += estimate
         workflow.state, workflow.error = "transcribing", None
-        db.add(LedgerEntry(kind="expense", category=PROCESSING_CATEGORY, cents=estimate, verified=False,
+        db.add(LedgerEntry(kind="expense", category=PROCESSING_CATEGORY, cents=estimate, verified=False, provenance="estimated",
                            note=f"estimated processing expense for job {job.id}, attempt {job.attempts}"))
         job.expires_at = job.expires_at or timestamp + timedelta(seconds=settings.workflow_timeout_seconds)
         deadline = utc(job.locked_at) + timedelta(seconds=max(
@@ -414,9 +415,13 @@ async def execute_metadata(job_id, worker_id, snapshot):
                 result = {"status": "blocked: provider not configured"}
     elif kind == "analytics" and publication and publication.status == "succeeded":
         adapter = analytics_jobs.ADAPTERS.get(publication.platform)
-        metrics = await adapter.collect(publication, account) if adapter else None
-        if metrics:
+        try:
+            if not adapter:
+                raise analytics_jobs.Unavailable("no analytics adapter for this platform")
+            metrics = await adapter.collect(publication, account)
             result = {"status": "collected", "metrics": sorted(metrics)}
+        except analytics_jobs.Unavailable as exc:
+            metrics, result = None, {"status": "unavailable", "reason": str(exc)}
 
     with SessionLocal() as db:
         row = lock_policy(db)
@@ -432,10 +437,21 @@ async def execute_metadata(job_id, worker_id, snapshot):
                 record_schedule_status(db, job, result["status"])
             else:
                 result = {"status": "disabled" if not current or not current.enabled else "superseded"}
-        elif kind == "analytics" and metrics:
-            db.add_all(MetricEvent(publication_id=job.publication_id, metric=metric, value=value, verified=True)
-                       for metric, value in metrics.items())
-            scheduler.enqueue(db, "optimize", key=f"optimize:{job.id}", payload={"platform": publication.platform})
+        elif kind == "analytics" and publication and publication.status == "succeeded":
+            window = payload.get("window") or "initial"
+            already = db.scalar(select(AnalyticsCollection.id).where(
+                AnalyticsCollection.publication_id == job.publication_id, AnalyticsCollection.window == window))
+            if already:
+                result = {"status": "duplicate", "window": window}
+            else:
+                provider = getattr(analytics_jobs.ADAPTERS.get(publication.platform), "provider", publication.platform)
+                db.add(AnalyticsCollection(publication_id=job.publication_id, window=window, provider=provider,
+                                           status=result["status"], reason=result.get("reason")))
+                if metrics:
+                    db.add_all(MetricEvent(publication_id=job.publication_id, metric=metric, value=value, verified=True,
+                                           source=f"{provider}_api", provenance="verified", window=window)
+                               for metric, value in metrics.items())
+                    scheduler.enqueue(db, "optimize", key=f"optimize:{job.id}", payload={"platform": publication.platform})
         elif kind == "optimize":
             result = analytics_jobs.optimize(db, payload["platform"])
         finish_success(job, result)

@@ -162,6 +162,23 @@ class MetricEvent(Base):
     value: Mapped[float] = mapped_column(Float)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    # source: which API/flow produced it; provenance: verified (official API) | imported | manual.
+    source: Mapped[str] = mapped_column(String(32), default="api")
+    provenance: Mapped[str] = mapped_column(String(16), default="verified")
+    window: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+
+class AnalyticsCollection(Base):
+    """One collection attempt per publication and window; records 'unavailable' instead of inventing zeros."""
+    __tablename__ = "analytics_collections"
+    __table_args__ = (UniqueConstraint("publication_id", "window", name="uq_analytics_collection_window"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    publication_id: Mapped[int] = mapped_column(Integer, index=True)
+    window: Mapped[str] = mapped_column(String(16))
+    provider: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class LedgerEntry(Base):
@@ -172,6 +189,26 @@ class LedgerEntry(Base):
     cents: Mapped[int] = mapped_column(Integer)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    # verified_platform | imported | manual | estimated (estimated is only ever a cost).
+    provenance: Mapped[str] = mapped_column(String(24), default="manual")
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    platform: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    publication_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    import_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+
+class RevenueImport(Base):
+    __tablename__ = "revenue_imports"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64), unique=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    rows: Mapped[int] = mapped_column(Integer)
+    actor: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
