@@ -1,4 +1,5 @@
 """Regression tests for the independent Sentinel security and worker review."""
+from conftest import alembic_head
 import asyncio
 import os
 import subprocess
@@ -30,10 +31,12 @@ async def test_health_during_slow_worker(queued, monkeypatch):
     enqueue(queued)
     started = asyncio.Event()
     loop = asyncio.get_running_loop()
-    def slow(*args):
-        loop.call_soon_threadsafe(started.set)
-        time.sleep(0.4)
-    monkeypatch.setattr(worker, 'process_job', slow)
+    async def slow(*args):
+        def block():
+            loop.call_soon_threadsafe(started.set)
+            time.sleep(0.4)
+        await asyncio.to_thread(block)
+    monkeypatch.setattr(worker, 'execute_media', slow)
     task = asyncio.create_task(worker.process_once())
     await started.wait()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
@@ -367,12 +370,17 @@ def test_cleanup_only_removes_unreferenced_output_folders(isolated_database, tmp
         db.add(Clip(source_id=source_id, start_seconds=0, end_seconds=1, description='clip',
                     hook='hook', score=1, status='rendered'))
         db.commit()
+    with isolated_database() as db:
+        old_run, keep_run = WorkflowRun(source_id=source_id, state='edited'), WorkflowRun(source_id=source_id, state='edited')
+        db.add_all([old_run, keep_run]); db.commit()
+        old_id, keep_id = old_run.id, keep_run.id
     source_root = root / 'clips' / f'source-{source_id}'
-    old = source_root / 'run-old'
-    keep = source_root / 'run-7'
+    old = source_root / f'run-{old_id}'
+    keep = source_root / f'run-{keep_id}'
     old.mkdir(parents=True)
     keep.mkdir(parents=True)
-    assert worker.cleanup_unreferenced_output_folders(source_id, 7) == 1
+    # Only folders of older workflow runs are removed; the current run (or a newer claim) is kept.
+    assert worker.cleanup_unreferenced_output_folders(source_id, keep_id) == 1
     assert not old.exists() and keep.exists()
 
 
@@ -402,7 +410,7 @@ def test_idle_session_pruning(isolated_database, monkeypatch):
 async def test_ready_requires_configured_redis(isolated_database, monkeypatch):
     with isolated_database() as db:
         db.execute(text('CREATE TABLE alembic_version (version_num VARCHAR(32))'))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0008_publishing')")); db.commit()
+        db.execute(text(f"INSERT INTO alembic_version VALUES ('{alembic_head()}')")); db.commit()
     async def unavailable(url): return False
     monkeypatch.setattr(main,'redis_ready',unavailable)
     monkeypatch.setattr(main.settings,'redis_url','redis://stub')

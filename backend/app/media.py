@@ -65,7 +65,7 @@ def run_media_command(argv: list[str], timeout: float) -> subprocess.CompletedPr
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
-def probe(path: Path) -> MediaProbe:
+def probe(path: Path, *, require_ffprobe: bool = False) -> MediaProbe:
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
         result = run_media_command([ffprobe, "-v", "error", "-show_entries", "format=duration", "-show_streams", "-of", "json", str(path)], settings.ffmpeg_timeout_seconds)
@@ -74,6 +74,8 @@ def probe(path: Path) -> MediaProbe:
         if not video:
             raise MediaProcessingError("media has no video stream")
         return MediaProbe(float(body["format"]["duration"]), int(video["width"]), int(video["height"]), any(s.get("codec_type") == "audio" for s in body.get("streams", [])))
+    if require_ffprobe:
+        raise MediaProcessingError("ffprobe is required for clip quality checks")
     result = run_media_command([_binary("ffmpeg"), "-hide_banner", "-i", str(path), "-f", "null", "-"], settings.ffmpeg_timeout_seconds)
     text = result.stderr
     duration_match = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", text)

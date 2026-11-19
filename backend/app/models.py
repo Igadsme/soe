@@ -39,6 +39,7 @@ class Source(Base):
     media_path: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     media_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    media_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -119,6 +120,7 @@ class Publication(Base):
     platform: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), default="queued")
     idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True)
+    automated: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     media_sha256: Mapped[str | None] = mapped_column(String(64))
     title: Mapped[str] = mapped_column(String(100), default="")
     description: Mapped[str] = mapped_column(Text, default="")
@@ -185,14 +187,27 @@ class AuthSession(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
-    __table_args__ = (Index("uq_jobs_active_source", "source_id", unique=True,
-                           sqlite_where=text("kind = 'process_source' AND status IN ('queued', 'running')"),
-                           postgresql_where=text("kind = 'process_source' AND status IN ('queued', 'running')")),)
+    _active = "status IN ('queued', 'running', 'cancel_requested')"
+    _active_source = f"kind = 'process_source' AND {_active}"
+    __table_args__ = (
+        Index("uq_jobs_active_source", "source_id", unique=True,
+              sqlite_where=text(_active_source), postgresql_where=text(_active_source)),
+        Index("uq_jobs_active_publication", "publication_id", unique=True,
+              sqlite_where=text(f"kind = 'publish' AND {_active}"),
+              postgresql_where=text(f"kind = 'publish' AND {_active}")),
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     kind: Mapped[str] = mapped_column(String(32), default="process_source")
-    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"))
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id"))
     workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_runs.id"))
-    publication_id: Mapped[int | None] = mapped_column(ForeignKey("publications.id", ondelete="CASCADE"), unique=True)
+    publication_id: Mapped[int | None] = mapped_column(ForeignKey("publications.id", ondelete="CASCADE"))
+    replay_of_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), unique=True)
+    payload: Mapped[dict | None] = mapped_column(JSON)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_class: Mapped[str | None] = mapped_column(String(32))
+    wait_reason: Mapped[str | None] = mapped_column(String(32))
+    interruption: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, default=3)
@@ -205,3 +220,35 @@ class Job(Base):
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+class AutomationPolicy(Base):
+    __tablename__ = "automation_policy"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    configuration: Mapped[dict] = mapped_column(JSON, default=dict)
+    emergency_stopped: Mapped[bool] = mapped_column(Boolean, default=False)
+    worker_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DiscoverySchedule(Base):
+    __tablename__ = "discovery_schedules"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    platform: Mapped[str] = mapped_column(String(16))
+    query: Mapped[str] = mapped_column(String(200))
+    channel_allowlist: Mapped[list[str]] = mapped_column(JSON, default=list)
+    interval_minutes: Mapped[int] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_results: Mapped[int] = mapped_column(Integer)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_status: Mapped[str | None] = mapped_column(String(64))
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(64))
+    entity: Mapped[str] = mapped_column(String(32), index=True)
+    entity_id: Mapped[str] = mapped_column(String(64))
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

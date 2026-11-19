@@ -118,7 +118,7 @@ def metrics_response(request: Request, db):
     # Query at scrape time instead of summing duplicate queue snapshots per worker.
     jobs = GaugeMetricFamily("soe_jobs", "Persisted jobs by status", labels=["status"])
     counts = dict(db.execute(select(Job.status, func.count()).group_by(Job.status)).all())
-    for status in ("queued", "running", "succeeded", "failed"):
+    for status in ("queued", "running", "cancel_requested", "succeeded", "failed", "dead_letter", "cancelled"):
         jobs.add_metric([status], counts.get(status, 0))
     queue_registry = CollectorRegistry()
     class QueueCollector:
@@ -126,3 +126,6 @@ def metrics_response(request: Request, db):
             yield jobs
     queue_registry.register(QueueCollector())
     return Response(generate_latest(registry) + generate_latest(queue_registry), media_type=CONTENT_TYPE_LATEST)
+
+
+JOB_RECLAIMED = Counter("soe_job_reclaimed_total", "Stuck jobs reclaimed", ["kind", "reason"])

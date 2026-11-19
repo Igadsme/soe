@@ -57,3 +57,15 @@ def isolated_database(tmp_path, monkeypatch):
     yield factory
     app.dependency_overrides.clear()
     engine.dispose()
+
+
+def alembic_head() -> str:
+    """Current migration head, so readiness tests do not hardcode a revision."""
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    root = Path(__file__).resolve().parents[2]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "backend" / "alembic"))
+    return ScriptDirectory.from_config(config).get_current_head()

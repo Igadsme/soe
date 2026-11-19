@@ -1,3 +1,4 @@
+from conftest import alembic_head
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -64,7 +65,7 @@ def test_discovery_status_and_unavailable(monkeypatch):
 def test_ready_independent_of_cwd(isolated_database, tmp_path, monkeypatch):
     with isolated_database() as db:
         db.execute(text('CREATE TABLE alembic_version (version_num VARCHAR(32))'))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0008_publishing')"))
+        db.execute(text(f"INSERT INTO alembic_version VALUES ('{alembic_head()}')"))
         db.commit()
     monkeypatch.chdir(tmp_path)
     with TestClient(main.app) as client:

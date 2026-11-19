@@ -20,7 +20,7 @@ export async function pollJob(jobId: string | number, { onStatus, intervalMs = 2
         apiFetch(`${api}/api/v1/jobs/${jobId}`, { signal: controller.signal }).then((response) => response.json()), timeout,
       ]);
       onStatus?.(job);
-      if (job.status === "succeeded" || job.status === "failed") return job;
+      if (["succeeded", "failed", "dead_letter", "cancelled"].includes(job.status)) return job;
       await Promise.race([new Promise<void>((resolve) => { delay = setTimeout(resolve, intervalMs); }), timeout]);
     }
   } finally { clearTimeout(deadline!); clearTimeout(delay!); }

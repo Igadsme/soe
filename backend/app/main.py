@@ -31,6 +31,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from .audit import audit
 from .auth import (
     csrf_token,
     development_bypass,
@@ -39,6 +40,9 @@ from .auth import (
     revoke_session,
     verify_password,
 )
+from .automation import ACTIVE, lock_policy
+from .automation_routes import check_source_idle
+from .automation_routes import router as automation_router
 from .config import secret_value, settings
 from .db import session
 from .integrations import (
@@ -53,16 +57,16 @@ from .models import (
     Job,
     LedgerEntry,
     MetricEvent,
-    Publication,
     RightsRecord,
     Source,
     WorkflowRun,
 )
 from .oauth_routes import router as oauth_router
 from .publication_routes import router as publication_router
-from .publications import lock_source
+from .publications import latest_rights, lock_source
 from .rate_limit import async_redis_limited, close_redis_clients, redis_ready
 from .rights import can_ingest_and_publish
+from .scheduler import authorized_media, enqueue_processing
 from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_media_path
 
 
@@ -85,6 +89,7 @@ app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in setti
 
 app.include_router(oauth_router)
 app.include_router(publication_router)
+app.include_router(automation_router)
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -331,7 +336,9 @@ def list_sources(db: Session = Depends(session), _: str = Depends(require_auth))
 
 
 @app.post("/api/v1/sources/{source_id}/rights", status_code=201)
-def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), actor: str = Depends(require_auth)) -> dict:
+    lock_policy(db)
+    lock_source(db, source_id)
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(404, "source not found")
@@ -339,15 +346,27 @@ def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=214
         raise HTTPException(422, "owned authorization requires an upload source")
     record = RightsRecord(source_id=source_id, **payload.model_dump())
     db.add(record)
-    source.status = "authorized" if can_ingest_and_publish(record) else "rights_review"
+    if can_ingest_and_publish(record):
+        if not authorized_media(source):
+            source.status = "awaiting_authorized_media"
+        elif not db.scalar(select(Clip.id).where(Clip.source_id == source.id).limit(1)):
+            source.status = "authorized"
+        else:
+            source.status = "analyzed"
+    else:
+        source.status = "rights_review"
+    db.flush()
+    audit(db, actor, "rights.record", "source", source_id, rights_id=record.id, authorized=can_ingest_and_publish(record))
     db.commit()
     return {"source_id": source_id, "status": source.status, "can_publish": can_ingest_and_publish(record)}
 
 
 @app.post("/api/v1/sources/{source_id}/process", status_code=202)
 def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    lock_policy(db)
+    lock_source(db, source_id)
     source = db.get(Source, source_id)
-    rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == source_id).order_by(RightsRecord.created_at.desc()))
+    rights = latest_rights(db, source_id)
     if not source or not rights:
         raise HTTPException(404, "source or rights record not found")
     if not can_ingest_and_publish(rights):
@@ -366,50 +385,13 @@ def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483
     existing = db.scalar(select(Job).where(Job.idempotency_key == key)) if key else None
     if existing and existing.source_id != source_id:
         raise HTTPException(409, "idempotency key already used")
-    lock_source(db, source_id)
-    referenced = db.scalar(
-        select(Publication.id)
-        .join(Clip, Clip.id == Publication.clip_id)
-        .where(Clip.source_id == source_id)
-        .limit(1)
-    )
-    if referenced:
-        raise HTTPException(409, "source reruns are disabled while publications reference its clips")
-    existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.kind == "process_source", Job.status.in_(["queued", "running"])))
+    existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.kind == "process_source", Job.status.in_(ACTIVE)))
     if existing:
         return JSONResponse({"job_id": existing.id, "status": existing.status}, status_code=200)
-    run = WorkflowRun(source_id=source_id, state="queued")
-    try:
-        db.add(run)
-        db.flush()
-        job = Job(id=uuid4().hex, source_id=source_id, workflow_id=run.id, idempotency_key=key)
-        db.add(job)
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        job = db.scalar(select(Job).where(Job.source_id == source_id, Job.kind == "process_source", Job.status.in_(["queued", "running"])))
-        if not job and key:
-            job = db.scalar(select(Job).where(Job.idempotency_key == key))
-        if not job or job.source_id != source_id:
-            raise HTTPException(409, "idempotency conflict") from None
+    check_source_idle(db, source_id, replace_qc=True)
+    job = enqueue_processing(db, source, idempotency_key=key)
+    db.commit()
     return {"job_id": job.id, "status": job.status}
-
-
-def job_read(job: Job) -> dict:
-    return {name: getattr(job, name) for name in ("id", "kind", "source_id", "publication_id", "status", "attempts", "max_attempts", "run_after", "last_error", "result", "created_at", "updated_at")}
-
-
-@app.get("/api/v1/jobs")
-def list_jobs(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
-    return [job_read(job) for job in db.scalars(select(Job).order_by(Job.created_at.desc()).limit(100))]
-
-
-@app.get("/api/v1/jobs/{job_id}")
-def get_job(job_id: str, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
-    job = db.get(Job, job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    return job_read(job)
 
 
 @app.get("/api/v1/clips", response_model=list[ClipRead])
@@ -434,11 +416,12 @@ def discover(platform: Literal["youtube", "twitch"], query: str = Query(min_leng
         items = asyncio.run(provider.search(query))
     except ProviderUnavailable as exc:
         raise HTTPException(exc.status_code, "service temporarily unavailable") from exc
+    lock_policy(db)
     created = 0
     for item in items:
         existing = db.scalar(select(Source).where(Source.external_id == item.external_id))
         if not existing:
-            db.add(Source(platform=item.platform, external_id=item.external_id, title=item.title, url=item.url, metadata_json=item.metadata))
+            db.add(Source(platform=item.platform, external_id=item.external_id, title=item.title, url=item.url, status="rights_review", metadata_json=item.metadata))
             created += 1
     db.commit()
     return {"provider": provider.__class__.__name__, "discovered": len(items), "created": created, "fixture": isinstance(provider, FixtureProvider)}

@@ -2,13 +2,16 @@
 
 from sqlalchemy import select, update
 
-from .models import Job, Publication, PublicationEvent, RightsRecord, Source, now
+from .audit import audit
+from .models import Job, Publication, PublicationEvent, RightsRecord, Source
 
 
 def transition(db, publication: Publication, status: str, actor: str, *, initial: bool = False) -> None:
     if initial or publication.status != status:
         db.add(PublicationEvent(publication_id=publication.id, from_status=None if initial else publication.status,
                                 to_status=status, actor=actor, error_class=publication.error_class))
+        if status == "running":
+            audit(db, actor, "publish.attempt", "publication", publication.id, attempt=publication.attempts)
         publication.status = status
 
 
@@ -18,7 +21,8 @@ def latest_rights(db, source_id: int):
 
 
 def publication_job(db, publication_id: int):
-    return db.scalar(select(Job).where(Job.publication_id == publication_id).with_for_update())
+    return db.scalar(select(Job).where(Job.publication_id == publication_id, Job.kind == "publish")
+                     .order_by(Job.created_at.desc(), Job.id.desc()).limit(1).with_for_update())
 
 
 def recover_expired(db, job: Job, exhausted: bool) -> None:
@@ -26,9 +30,9 @@ def recover_expired(db, job: Job, exhausted: bool) -> None:
     if publication is None:
         return
     publication.attempts = job.attempts
-    publication.error_class = "transient"
-    publication.last_error = "Worker lease expired"
-    publication.next_attempt_at = None if exhausted else now()
+    publication.error_class = job.error_class
+    publication.last_error = job.last_error
+    publication.next_attempt_at = None if exhausted else job.run_after
     transition(db, publication, "failed" if exhausted else "queued", "worker")
 
 

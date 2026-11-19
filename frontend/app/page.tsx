@@ -50,7 +50,7 @@ export default function Home() {
       setMessage(`Processing: ${queued.status}`);
       const job = await pollJob(queued.job_id, { onStatus: (job) => setMessage(`Processing: ${job.status}`) });
       await refresh();
-      if (job.status === "failed") throw new Error(job.last_error ?? "Processing failed");
+      if (job.status !== "succeeded") throw new Error(job.last_error ?? "Processing failed");
       setMessage(`${job.result?.clips_generated ?? 0} clips rendered from ${job.result?.transcript_segments ?? 0} transcript segments.`);
     } catch (error) { setError(error instanceof Error ? error.message : "Processing failed"); }
   };

@@ -13,7 +13,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import publishing
+from .audit import audit
 from .auth import require_auth
+from .automation import ACTIVE, lock_policy
 from .config import settings
 from .db import session
 from .media import sha256_file
@@ -69,12 +71,23 @@ def queued(row: Publication) -> dict:
 @router.post("/clips/{clip_id}/publish")
 def queue_publication(payload: PublicationRequest, clip_id: int = PathParam(gt=0, le=2147483647),
                       db: Session = Depends(session), actor: str = Depends(require_auth)) -> dict:
+    lock_policy(db)
+    try:
+        result = schedule_publication(db, clip_id, payload, actor)
+        db.commit()
+    except IntegrityError:
+        raise HTTPException(409, "Publication could not be queued") from None
+    return result
+
+
+def schedule_publication(db, clip_id: int, payload: PublicationRequest, actor: str, *, automated=False) -> dict:
     platform = payload.platform
     if not settings.publishing_allowed(platform):
         raise HTTPException(409, "Publishing is disabled for this platform")
     clip = db.get(Clip, clip_id)
     if not clip:
         raise HTTPException(404, "clip not found")
+    lock_source(db, clip.source_id)
     rights = latest_rights(db, clip.source_id)
     if not rights or not can_publish_to(rights, platform):
         raise HTTPException(403, "Current rights do not authorize publication to this platform")
@@ -93,22 +106,23 @@ def queue_publication(payload: PublicationRequest, clip_id: int = PathParam(gt=0
         raise HTTPException(422, str(exc)) from None
     try:
         media = Path(safe_media_path(clip.output_path or ""))
-        if clip.status != "rendered" or not media.is_file():
+        if clip.status not in {"rendered", "approved"} or not media.is_file():
             raise ValueError
         total = media.stat().st_size
         if total <= 0:
             raise ValueError
-        digest = sha256_file(media)
+        digest = clip.evidence.get("qc_sha256") or sha256_file(media)
     except (ValueError, OSError):
         raise HTTPException(422, "Clip must have a rendered local media file") from None
-    lock_source(db, clip.source_id)
     active_processing = db.scalar(select(Job.id).where(
-        Job.kind == "process_source", Job.source_id == clip.source_id, Job.status.in_(["queued", "running"]),
+        Job.kind == "process_source", Job.source_id == clip.source_id, Job.status.in_(ACTIVE),
     ).limit(1))
     if active_processing or db.scalar(select(Clip.id).where(Clip.id == clip.id)) is None:
         raise HTTPException(409, "Rendered clip is being replaced by source processing")
     key = sha256(f"{clip.id}:{platform}:{account.id}:{digest}".encode()).hexdigest()
-    existing = db.scalar(select(Publication).where(Publication.idempotency_key == key))
+    existing = db.scalar(select(Publication).where(
+        Publication.clip_id == clip.id, Publication.platform == platform, Publication.account_id == account.id,
+    ).order_by(Publication.id).limit(1))
     if existing:
         return queued(existing)
     timestamp = now()
@@ -117,19 +131,12 @@ def queue_publication(payload: PublicationRequest, clip_id: int = PathParam(gt=0
     status = "scheduled" if run_after > timestamp else "queued"
     row = Publication(clip_id=clip.id, account_id=account.id, platform=platform, status=status,
                       idempotency_key=key, media_sha256=digest, bytes_total=total, title=title, description=description,
-                      privacy_status=privacy, dry_run=settings.publishing_dry_run, scheduled_at=scheduled, next_attempt_at=run_after)
-    try:
-        db.add(row)
-        db.flush()
-        transition(db, row, status, actor, initial=True)
-        db.add(Job(id=uuid4().hex, source_id=clip.source_id, publication_id=row.id, kind="publish",
-                   run_after=run_after, max_attempts=settings.publishing_max_attempts))
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        row = db.scalar(select(Publication).where(Publication.idempotency_key == key))
-        if row is None:
-            raise HTTPException(409, "Publication could not be queued") from None
+                      privacy_status=privacy, automated=automated, dry_run=settings.publishing_dry_run, scheduled_at=scheduled, next_attempt_at=run_after)
+    db.add(row)
+    db.flush()
+    transition(db, row, status, actor, initial=True)
+    db.add(Job(id=uuid4().hex, source_id=clip.source_id, publication_id=row.id, kind="publish",
+               run_after=run_after, max_attempts=settings.publishing_max_attempts))
     return queued(row)
 
 
@@ -147,6 +154,7 @@ def publication_or_404(db, publication_id: int) -> Publication:
 
 @router.post("/publications/{publication_id}/retry")
 def retry(publication_id: int, db: Session = Depends(session), actor: str = Depends(require_auth)) -> dict:
+    lock_policy(db)
     job = publication_job(db, publication_id)
     row = publication_or_404(db, publication_id)
     if not job or row.status != "failed" or row.error_class not in publishing.RETRYABLE:
@@ -154,8 +162,8 @@ def retry(publication_id: int, db: Session = Depends(session), actor: str = Depe
     if not settings.publishing_allowed(row.platform):
         raise HTTPException(409, "Publishing is disabled for this platform")
     timestamp = now()
-    changed = db.execute(update(Job).where(Job.id == job.id, Job.status == "failed").values(
-        status="queued", attempts=0, run_after=timestamp, last_error=None,
+    changed = db.execute(update(Job).where(Job.id == job.id, Job.status.in_(["failed", "dead_letter"])).values(
+        status="queued", attempts=0, run_after=timestamp, last_error=None, error_class=None, expires_at=None,
     ))
     if not changed.rowcount:
         raise HTTPException(409, "Publication is not eligible for retry")
@@ -163,12 +171,14 @@ def retry(publication_id: int, db: Session = Depends(session), actor: str = Depe
     row.next_attempt_at = timestamp
     row.error_class = row.last_error = None
     transition(db, row, "queued", actor)
+    audit(db, actor, "publication.retry", "publication", row.id, job_id=job.id)
     db.commit()
     return queued(row)
 
 
 @router.post("/publications/{publication_id}/cancel")
 def cancel(publication_id: int, db: Session = Depends(session), actor: str = Depends(require_auth)) -> dict:
+    lock_policy(db)
     job = publication_job(db, publication_id)
     row = publication_or_404(db, publication_id)
     if not job or row.status not in {"queued", "scheduled"} or row.upload_started_at is not None:
@@ -178,6 +188,7 @@ def cancel(publication_id: int, db: Session = Depends(session), actor: str = Dep
         raise HTTPException(409, "Publication has already been claimed")
     row.next_attempt_at = None
     transition(db, row, "cancelled", actor)
+    audit(db, actor, "job.cancel", "job", job.id, status="cancelled")
     db.commit()
     return queued(row)
 

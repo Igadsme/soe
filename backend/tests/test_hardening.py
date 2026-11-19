@@ -1,3 +1,4 @@
+from conftest import alembic_head
 import json
 import logging
 import re
@@ -181,7 +182,7 @@ async def test_readiness_requires_migration_head(client, isolated_database):
     assert (await client.get("/ready")).status_code == 503
     with isolated_database() as db:
         db.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0008_publishing')"))
+        db.execute(text(f"INSERT INTO alembic_version VALUES ('{alembic_head()}')"))
         db.commit()
     assert (await client.get("/ready")).json() == {"status": "ready", "service": "soe-api"}
     with isolated_database() as db:

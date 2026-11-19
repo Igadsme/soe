@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     ffmpeg_timeout_seconds: float = 300
     processing_deadline_floor_seconds: float = Field(default=300, ge=1)
     processing_deadline_duration_multiplier: float = Field(default=5, ge=1)
+    media_terminate_grace_seconds: float = Field(default=1, gt=0, le=10)
+    workflow_timeout_seconds: int = Field(default=21600, ge=60)
+    scheduler_interval_seconds: int = Field(default=15, ge=1)
+    analytics_interval_minutes: int = Field(default=1440, ge=1)
+    processing_cents_per_minute: float = Field(default=1, ge=0, le=100000, allow_inf_nan=False)
+    qc_min_clip_seconds: float = Field(default=1, gt=0)
+    qc_min_mean_db: float = Field(default=-50, ge=-90, le=0)
     max_source_seconds: float = 3600
     whisper_cache_dir: str = "/app/.cache/whisper"
     media_root: str = "./media"
