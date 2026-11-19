@@ -1,13 +1,18 @@
 "use client";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useResource } from "../../lib/useResource";
-import { DataState } from "../../components/ui";
+import { Badge, DataState } from "../../components/ui";
 import { totalsByMetric, type Metric } from "../../lib/metrics";
 
 type Analytics = { verified: Metric[]; unverified: Metric[] };
+type Recommendations = { state: "insufficient_data" | "learned"; sample_size: number; required_samples: number; target: string; disclaimer: string;
+  weights: Record<string, number> | null; blend_weight: number; suggestions?: { best_posting_hour_utc: number; duration: string; heuristic_agrees_with_outcomes: boolean } };
+type Collection = { id: number; publication_id: number; window: string; provider: string; status: string; reason: string | null; attempted_at: string };
 
 export default function AnalyticsPage() {
   const analytics = useResource<Analytics>("/api/v1/analytics");
+  const recommendations = useResource<Recommendations>("/api/v1/analytics/recommendations");
+  const collections = useResource<Collection[]>("/api/v1/analytics/collections");
   return <>
     <header className="page-head"><p className="eyebrow">PERFORMANCE</p><h1>Analytics</h1>
       <p className="muted">Only metrics collected from platform APIs are verified. Nothing here is estimated.</p></header>
@@ -30,5 +35,26 @@ export default function AnalyticsPage() {
         </section>}
       </>;
     }}</DataState>
+    <section className="panel" aria-labelledby="collections-title">
+      <h2 id="collections-title">Collection attempts</h2>
+      <DataState resource={collections} empty="No collection attempts yet.">{(rows) => <ul className="rows">{rows.slice(0, 30).map((row) => <li key={row.id}>
+        Publication {row.publication_id} · {row.window} · {row.provider} · <Badge value={row.status} />{row.reason && <span className="muted">{row.reason}</span>}
+      </li>)}</ul>}</DataState>
+    </section>
+    <section className="panel" aria-labelledby="learn-title">
+      <h2 id="learn-title">Recommendations</h2>
+      <DataState resource={recommendations} empty="">{(data) => data.state === "insufficient_data"
+        ? <p className="empty-state">Insufficient data: {data.sample_size} of {data.required_samples} publications have verified 7-day metrics. Ranking uses the transparent heuristic only.</p>
+        : <>
+          <dl className="facts">
+            <div><dt>Sample size</dt><dd>{data.sample_size}</dd></div>
+            <div><dt>Learned share of score</dt><dd>{Math.round(data.blend_weight * 100)}%</dd></div>
+            <div><dt>Best posting hour (UTC)</dt><dd>{data.suggestions?.best_posting_hour_utc}:00</dd></div>
+            <div><dt>Duration trend</dt><dd>{data.suggestions?.duration} clips</dd></div>
+          </dl>
+          <p className="muted">Weights: {Object.entries(data.weights ?? {}).map(([key, value]) => `${key} ${value.toFixed(3)}`).join(" · ")}</p>
+        </>}</DataState>
+      <p className="muted">{recommendations.data?.disclaimer}</p>
+    </section>
   </>;
 }

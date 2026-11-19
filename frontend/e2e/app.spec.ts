@@ -44,7 +44,8 @@ test("every page loads real data with empty states and passes axe", async ({ pag
   await page.goto("/analytics");
   await expect(page.getByText(/No metrics collected yet/)).toBeVisible();
   await page.goto("/revenue");
-  await expect(page.getByText(/Platform earnings are unavailable/)).toBeVisible();
+  await expect(page.getByText("No ledger entries yet.")).toBeVisible();
+  await expect(page.locator("section", { hasText: "Platform earnings" }).getByText("unavailable", { exact: true })).toHaveCount(3);
 });
 
 test("discovery without provider credentials shows an honest error", async ({ page }) => {
@@ -133,6 +134,36 @@ test("policy editing, emergency stop with confirmation, and audit trail", async 
   await page.goto("/agents");
   await expect(page.getByText(/system\.emergency_stop/).first()).toBeVisible();
   await expect(page.getByText(/policy/).first()).toBeVisible();
+  await expectAccessible(page);
+});
+
+test("revenue: manual entry, estimated cost excluded from revenue, CSV import, duplicate rejected", async ({ page }) => {
+  await page.goto("/revenue");
+  const form = page.locator("section", { hasText: "Record an entry" });
+  await form.getByLabel("Amount (USD)").fill("120.50");
+  await form.getByLabel("Category").selectOption("sponsorship");
+  await form.getByLabel("Reference").fill("Synthetic sponsorship invoice E2E-1");
+  await form.getByRole("button", { name: "Record" }).click();
+  await expect(page.getByText("Ledger entry recorded.")).toBeVisible();
+  await form.getByLabel("Kind").selectOption("expense");
+  await form.getByLabel("Category").selectOption("cloud_cost");
+  await form.getByLabel("Amount (USD)").fill("20");
+  await form.getByLabel("Reference").fill("Synthetic hosting estimate");
+  await form.getByLabel("Cost is an estimate").check();
+  await form.getByRole("button", { name: "Record" }).click();
+  await expect(page.getByText("Ledger entry recorded.")).toBeVisible();
+  const csv = "date,kind,category,amount,currency,platform,reference\n2026-10-01,revenue,platform_earnings,9.99,USD,tiktok,Synthetic statement\n";
+  const file = { name: "statement.csv", mimeType: "text/csv", buffer: Buffer.from(csv) };
+  const importer = page.locator("section", { hasText: "Import a statement" });
+  await importer.getByLabel("CSV file").setInputFiles(file);
+  await importer.getByRole("button", { name: "Import" }).click();
+  await expect(page.getByText("Statement imported.")).toBeVisible();
+  await expect(page.locator(".card", { hasText: "Revenue (verified + imported + manual)" })).toContainText("$130.49");
+  await expect(page.locator(".card", { hasText: "Estimated costs" })).toContainText("$20.00");
+  await expect(page.locator(".card", { hasText: /^Net/ })).toContainText("$110.49");
+  await importer.getByLabel("CSV file").setInputFiles(file);
+  await importer.getByRole("button", { name: "Import" }).click();
+  await expect(page.locator("main").getByRole("alert")).toContainText("already imported");
   await expectAccessible(page);
 });
 
