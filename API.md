@@ -10,7 +10,7 @@
 - `POST /api/v1/demo/pipeline` — create clearly labeled local fixture records; performs no fake media processing.
 - `POST /api/v1/discovery/search?platform=youtube|twitch&query=...` — use an official adapter when credentials exist, otherwise an explicitly labeled fixture in development mode.
 - `GET /api/v1/publications` — list publication queue/history records.
-- `POST /api/v1/clips/{id}/publish?platform=...` — rights-gated queue operation; disabled unless `SOE_PUBLISHING_ENABLED=true`.
+- `POST /api/v1/clips/{id}/publish` — rights-gated publication queue for a rendered clip and connected account.
 - `GET /api/v1/analytics` — separate verified and unverified metric observations.
 - `POST /api/v1/auth/login` / `POST /api/v1/auth/logout` — signed HttpOnly session lifecycle; development bypass requires explicit opt-in, a loopback peer, and no configured credentials.
 - `POST /api/v1/sources/upload` — validated local video upload, initially stored as `rights_review`.
@@ -44,8 +44,46 @@ Source read responses expose `has_media`; they never expose `media_path`.
 - `POST /api/v1/sources`: duplicate external_id returns 409.
 - `POST /api/v1/sources/{id}/rights`: owned requires an upload source; evidence requires at least 20 non-whitespace characters; allowed_platforms is a required non-empty list drawn from upload/youtube/twitch/tiktok/instagram. Invalid input returns 422. Naive expires_at is interpreted as UTC. Empty existing scopes deny processing and publishing.
 - `POST /api/v1/sources/{id}/process`: 202 with job_id/status for a new durable job; 200 for the same idempotency key or an existing active source job; 409 for a conflicting key. No media work runs in this request. Expired worker leases retry up to max_attempts then fail, including workflow state. Poll `GET /api/v1/jobs/{job_id}` or `GET /api/v1/jobs`.
-- `POST /api/v1/clips/{id}/publish?platform=...`: idempotent per clip/platform, returning the existing publication_id/status; 409 when publishing is disabled. Production/staging reject enabled publishing at startup while adapters remain incomplete.
 - Discovery provider 401/403, rate limits and timeouts return generic 503; malformed provider data returns generic 502.
 - `/ready`: 503 if DB, migration head, or configured Redis is unavailable; `/health` remains lightweight.
 
 Environment defaults are production/demo off. Staging has the same startup validation, HSTS and Secure cookie policy as production. Development bypass requires explicit opt-in, a loopback peer and no configured credentials.
+
+## Connected accounts and publishing
+
+- `GET /api/v1/oauth/{platform}/start` returns an `authorization_url` for the signed-in operator. Navigate to it in that browser. Returns 409 if the client, redirect origin, or encryption key is missing. Accepted platforms are `youtube`, `tiktok`, and `instagram`.
+- `GET /api/v1/oauth/{platform}/callback` checks the signed-in operator’s browser session and atomically consumes an unexpired state for that platform. It redirects to `/publishing` with `oauth=success|failure` and `platform`. State expires after 10 minutes. YouTube also uses PKCE S256.
+- `GET /api/v1/accounts` lists account IDs, platform identities, scopes, connection status, expiry, and daily upload limit. `DELETE /api/v1/accounts/{id}` clears local credentials immediately and attempts provider revocation. Mutations require the session CSRF header.
+
+Send JSON to `POST /api/v1/clips/{id}/publish` with `platform`, `account_id`, and optional `title`, `description`, `privacy_status`, and ISO 8601 `scheduled_at`. Metadata defaults to the clip’s hook and description. Naive timestamps are UTC. The response contains `publication_id` and `status`. An identical clip, platform, account, and rendered file SHA-256 returns the existing row. A gate or account conflict returns 409, rights denial returns 403, and invalid metadata or missing rendered media returns 422.
+
+- YouTube accepts `private` (default) and `unlisted`. Scheduled jobs start at or after the requested time and preserve their chosen visibility.
+- TikTok defaults to `SELF_ONLY`. Audited apps may explicitly submit `tiktok_privacy_level` when supported by the creator’s settings and approval. `unlisted` applies only to YouTube.
+- Instagram Reels use the linked professional account’s visibility. Submit `instagram_visibility_acknowledged: true` for a real upload. Captions are limited to 2,200 characters.
+- `GET /api/v1/publications` reports upload progress in bytes, attempts, next attempt, sanitized errors, and provider IDs and URLs when available. `GET /api/v1/publications/{id}/events` returns timestamped state transitions and their actors.
+- `POST /api/v1/publications/{id}/cancel` cancels queued or scheduled rows before upload starts. `POST /api/v1/publications/{id}/retry` requeues a dead-lettered transient or rate-limited row with its existing checkpoint. A response of 409 means the row is ineligible.
+- With `SOE_PUBLISHING_DRY_RUN`, the worker performs local rights, account, quota, schedule, metadata and media checks. It records a terminal `dry_run` result without provider calls. The idempotency key still applies to that row.
+
+## Automation, jobs and library
+
+- `GET/PUT /api/v1/automation/policy`: full policy document (unknown fields rejected). `GET /api/v1/system/status`, `POST /api/v1/system/emergency-stop`, `POST /api/v1/system/resume` (emergency stop cancels running jobs).
+- `GET /api/v1/jobs?status=&kind=`, `GET /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/cancel`, `POST /api/v1/jobs/{id}/replay` (dead-lettered, failed or cancelled jobs only). Job kinds: process_source, render_clip, quality_check, discovery, publish, analytics, optimize.
+- `GET/POST /api/v1/discovery/schedules`, `PATCH/DELETE /api/v1/discovery/schedules/{id}`. Discovery creates candidates only; it never grants rights.
+- `GET /api/v1/audit?entity=&limit=` audit trail.
+- `POST /api/v1/clips/{id}/approve` (pending_review only, rights re-checked), `/reject`, `/rerender {start_seconds, end_seconds}` (202, render_clip job then QC), `DELETE /api/v1/clips/{id}`, `POST /api/v1/sources/{id}/archive`, `POST /api/v1/sources/{id}/rights/revoke`.
+- `GET /api/v1/clips/{id}/download?inline=true` serves Range requests with inline disposition for `<video>` previews.
+- `GET /api/v1/settings` adds `publishing_dry_run` and `publishing_platforms.{youtube,tiktok,instagram}.{enabled,oauth_configured}`.
+
+## Analytics and revenue
+
+See docs/ANALYTICS_AND_REVENUE.md for provenance classes and required scopes.
+
+- `GET /api/v1/analytics`: verified vs unverified metric events (unchanged shape).
+- `GET /api/v1/analytics/collections`: latest collection attempts per publication window, with `status` collected|unavailable and `reason`.
+- `GET /api/v1/analytics/recommendations`: `state` insufficient_data (below `SOE_LEARNER_MIN_SAMPLES`, default 30) or learned, with `weights`, `blend_weight` (capped at 0.5), `sample_size`, suggestions and a disclaimer.
+- `GET /api/v1/revenue`: entries (with provenance, currency, platform, period, links, reference) plus `summary`.
+- `GET /api/v1/revenue/summary`: revenue split verified_platform / imported / manual, costs split actual / estimated, `net_cents` with label, `platform_earnings.{platform}` = available with cents and provenance, or unavailable with `cents: null` and a reason. Non-USD rows are listed, never converted.
+- `POST /api/v1/revenue/entries` (201): manual entry. `estimated` provenance only for `kind: expense` (422 otherwise). Categories: revenue sponsorship|affiliate|platform_earnings|other; cost processing_cost|cloud_cost|other.
+- `POST /api/v1/revenue/import` (201, multipart `file`): CSV with header `date,kind,category,amount,currency,platform,reference`, UTF-8, ≤1 MB, ≤5000 rows, amounts positive with ≤2 decimals. Any invalid row rejects the whole file (422 with row numbers). Same file again (SHA-256) → 409.
+- `GET /api/v1/revenue/export.csv`: ledger export; cells starting with = + - @ tab or CR are prefixed with `'`.
+- `GET /api/v1/overview` revenue fields use the same summary semantics (`revenue_cents` = verified+imported+manual, `expense_cents` = actual costs, `estimated_cost_cents`).

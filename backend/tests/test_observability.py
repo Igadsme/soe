@@ -59,6 +59,7 @@ def test_sentry_configured(monkeypatch):
     assert kwargs['send_default_pii'] is False
     assert kwargs['traces_sample_rate'] == 0
     assert kwargs['before_send'] is obs.scrub_event
+    assert [item.identifier for item in kwargs['disabled_integrations']] == ['httpx']
     assert kwargs['environment'] == settings.env
 
 

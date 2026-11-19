@@ -93,3 +93,20 @@ def test_production_warns_when_proxy_trust_is_empty(monkeypatch, caplog):
     with TestClient(main.app):
         pass
     assert 'SOE_TRUSTED_PROXIES is empty' in caplog.text
+
+
+def test_production_publishing_requires_credentials_keys_and_https_origin():
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key().decode()
+    configured = dict(google_client_id="fixture-id", google_client_secret="fixture-secret",
+                      oauth_redirect_base="https://app.example.com")
+    with pytest.raises(RuntimeError, match="SOE_TOKEN_ENCRYPTION_KEYS"):
+        production_settings(**configured).validate_production()
+    with pytest.raises(RuntimeError, match="SOE_TOKEN_ENCRYPTION_KEYS"):
+        production_settings(**configured, token_encryption_keys=f"{key},invalid").validate_production()
+    with pytest.raises(RuntimeError, match="SOE_PUBLISHING_ENABLED"):
+        production_settings(publishing_enabled=True, token_encryption_keys=key).validate_production()
+    production_settings(**configured, publishing_enabled=True, token_encryption_keys=key).validate_production()
+    configured["oauth_redirect_base"] = "http://app.example.com"
+    with pytest.raises(RuntimeError, match="SOE_OAUTH_REDIRECT_BASE"):
+        production_settings(**configured, publishing_enabled=True, token_encryption_keys=key).validate_production()

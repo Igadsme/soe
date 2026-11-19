@@ -1,0 +1,95 @@
+{
+  "generated_at": "2026-11-19T02:03:22-05:00",
+  "runner": "@playwright/test 1.65.1 + @axe-core/playwright 4.14.0 (wcag2a/aa, wcag21a/aa; serious+critical fail)",
+  "backend": "real FastAPI + worker (alembic head, SQLite, development env, publishing disabled), real ffmpeg + faster-whisper tiny.en",
+  "frontend": "next build standalone server",
+  "media": "talk_1080p_h264.mp4 (generated with ffmpeg + espeak-ng, 25s)",
+  "projects": [
+    "desktop (Desktop Chrome)",
+    "mobile (Pixel 7)"
+  ],
+  "stats": {
+    "startTime": "2026-11-19T07:02:36.134Z",
+    "duration": 35206.224,
+    "expected": 10,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "tests": [
+    {
+      "file": "auth.setup.ts",
+      "title": "sign in once",
+      "project": "setup",
+      "status": "passed",
+      "duration_ms": 364
+    },
+    {
+      "file": "app.spec.ts",
+      "title": "every page loads real data with empty states and passes axe",
+      "project": "desktop",
+      "status": "passed",
+      "duration_ms": 3934
+    },
+    {
+      "file": "app.spec.ts",
+      "title": "discovery without provider credentials shows an honest error",
+      "project": "desktop",
+      "status": "passed",
+      "duration_ms": 282
+    },
+    {
+      "file": "app.spec.ts",
+      "title": "upload, rights, real processing, preview and approval",
+      "project": "desktop",
+      "status": "passed",
+      "duration_ms": 16300
+    },
+    {
+      "file": "app.spec.ts",
+      "title": "publishing shows unconfigured OAuth and validates the schedule form",
+      "project": "desktop",
+      "status": "passed",
+      "duration_ms": 871
+    },
+    {
+      "file": "app.spec.ts",
+      "title": "policy editing, emergency stop with confirmation, and audit trail",
+      "project": "desktop",
+      "status": "passed",
+      "duration_ms": 1129
+    },
+    {
+      "file": "app.spec.ts",
+      "title": "populated pages stay accessible; evidence screenshots",
+      "project": "desktop",
+      "status": "passed",
+      "duration_ms": 4445
+    },
+    {
+      "file": "app.spec.ts",
+      "title": "unauthenticated visitors are sent to login and bad credentials are rejected",
+      "project": "desktop",
+      "status": "passed",
+      "duration_ms": 728
+    },
+    {
+      "file": "app.spec.ts",
+      "title": "signing in, signing out and revoked sessions return to login",
+      "project": "desktop",
+      "status": "passed",
+      "duration_ms": 518
+    },
+    {
+      "file": "mobile.spec.ts",
+      "title": "mobile navigation, no horizontal overflow, skip link",
+      "project": "mobile",
+      "status": "passed",
+      "duration_ms": 2741
+    }
+  ],
+  "not_covered": [
+    "live OAuth consent and real platform uploads (BLOCKED: no credentials; covered by contract tests)",
+    "live discovery APIs (BLOCKED: no API keys)"
+  ]
+}

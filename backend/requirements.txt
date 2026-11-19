@@ -13,6 +13,7 @@ numpy>=2.0,<3
 python-multipart==0.0.31
 gunicorn==23.0.0
 httpx==0.28.1
+cryptography==50.0.2
 redis==8.1.0
 av==18.0.0  # faster-whisper 1.2.1 calls av.open(metadata_errors=...), removed in av 19
 prometheus-client==0.24.1

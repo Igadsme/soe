@@ -1,4 +1,5 @@
 """Regression tests for the independent Sentinel security and worker review."""
+from conftest import alembic_head
 import asyncio
 import os
 import subprocess
@@ -30,10 +31,12 @@ async def test_health_during_slow_worker(queued, monkeypatch):
     enqueue(queued)
     started = asyncio.Event()
     loop = asyncio.get_running_loop()
-    def slow(*args):
-        loop.call_soon_threadsafe(started.set)
-        time.sleep(0.4)
-    monkeypatch.setattr(worker, 'process_job', slow)
+    async def slow(*args):
+        def block():
+            loop.call_soon_threadsafe(started.set)
+            time.sleep(0.4)
+        await asyncio.to_thread(block)
+    monkeypatch.setattr(worker, 'execute_media', slow)
     task = asyncio.create_task(worker.process_once())
     await started.wait()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
@@ -297,25 +300,33 @@ def test_expired_worker_lease_updates_workflow(queued, isolated_database):
         assert db.get(WorkflowRun, job.workflow_id).state == 'queued'
 
 
-def test_publication_idempotency_unique_constraint(isolated_database, monkeypatch):
-    from app.models import Source, RightsRecord, Publication
+def test_publication_idempotency_unique_constraint(isolated_database, monkeypatch, tmp_path):
+    from app.models import Source, RightsRecord, Publication, ConnectedAccount
     from sqlalchemy.exc import IntegrityError
     monkeypatch.setattr(main.settings,'publishing_enabled',True)
+    monkeypatch.setattr(main.settings,'publish_youtube_enabled',True)
+    media = tmp_path / 'media' / 'render.mp4'
+    media.parent.mkdir()
+    media.write_bytes(b'video')
     with isolated_database() as db:
         source = Source(platform='upload',external_id='publish',title='test',url='https://example.com')
         db.add(source); db.flush()
-        clip = Clip(source_id=source.id,start_seconds=0,end_seconds=1,description='test',hook='test',score=1)
+        clip = Clip(source_id=source.id,start_seconds=0,end_seconds=1,description='test',hook='test',score=1,status='rendered',output_path=str(media))
         db.add(clip); db.flush()
         clip_id = clip.id
         db.add(RightsRecord(source_id=source.id,authorization_type='owned',commercial_use=True,publishing_allowed=True,allowed_platforms=['youtube'],evidence='Owned authorization document'))
+        account = ConnectedAccount(platform='youtube',external_account_id='account',display_name='Account')
+        db.add(account)
         db.commit()
+        payload = {'platform': 'youtube', 'account_id': account.id}
     with TestClient(main.app) as client:
-        first = client.post(f'/api/v1/clips/{clip_id}/publish?platform=youtube')
-        second = client.post(f'/api/v1/clips/{clip_id}/publish?platform=youtube')
+        first = client.post(f'/api/v1/clips/{clip_id}/publish', json=payload)
+        second = client.post(f'/api/v1/clips/{clip_id}/publish', json=payload)
         assert first.status_code == 200 and first.json() == second.json()
     with isolated_database() as db:
-        assert len(list(db.scalars(select(Publication)))) == 1
-        db.add(Publication(clip_id=clip_id,platform='youtube'))
+        rows = list(db.scalars(select(Publication)))
+        assert len(rows) == 1
+        db.add(Publication(clip_id=clip_id,platform='youtube',idempotency_key=rows[0].idempotency_key))
         with pytest.raises(IntegrityError): db.commit()
 
 
@@ -359,12 +370,17 @@ def test_cleanup_only_removes_unreferenced_output_folders(isolated_database, tmp
         db.add(Clip(source_id=source_id, start_seconds=0, end_seconds=1, description='clip',
                     hook='hook', score=1, status='rendered'))
         db.commit()
+    with isolated_database() as db:
+        old_run, keep_run = WorkflowRun(source_id=source_id, state='edited'), WorkflowRun(source_id=source_id, state='edited')
+        db.add_all([old_run, keep_run]); db.commit()
+        old_id, keep_id = old_run.id, keep_run.id
     source_root = root / 'clips' / f'source-{source_id}'
-    old = source_root / 'run-old'
-    keep = source_root / 'run-7'
+    old = source_root / f'run-{old_id}'
+    keep = source_root / f'run-{keep_id}'
     old.mkdir(parents=True)
     keep.mkdir(parents=True)
-    assert worker.cleanup_unreferenced_output_folders(source_id, 7) == 1
+    # Only folders of older workflow runs are removed; the current run (or a newer claim) is kept.
+    assert worker.cleanup_unreferenced_output_folders(source_id, keep_id) == 1
     assert not old.exists() and keep.exists()
 
 
@@ -394,7 +410,7 @@ def test_idle_session_pruning(isolated_database, monkeypatch):
 async def test_ready_requires_configured_redis(isolated_database, monkeypatch):
     with isolated_database() as db:
         db.execute(text('CREATE TABLE alembic_version (version_num VARCHAR(32))'))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0007_schema_hardening')")); db.commit()
+        db.execute(text(f"INSERT INTO alembic_version VALUES ('{alembic_head()}')")); db.commit()
     async def unavailable(url): return False
     monkeypatch.setattr(main,'redis_ready',unavailable)
     monkeypatch.setattr(main.settings,'redis_url','redis://stub')

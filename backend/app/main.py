@@ -31,6 +31,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from . import analytics_routes
+from . import revenue as revenue_routes
+from .audit import audit
 from .auth import (
     csrf_token,
     development_bypass,
@@ -39,6 +42,9 @@ from .auth import (
     revoke_session,
     verify_password,
 )
+from .automation import ACTIVE, lock_policy
+from .automation_routes import check_source_idle
+from .automation_routes import router as automation_router
 from .config import secret_value, settings
 from .db import session
 from .integrations import (
@@ -47,19 +53,23 @@ from .integrations import (
     TwitchHelixProvider,
     YouTubeDataProvider,
 )
+from .library_routes import router as library_router
 from .logging_config import configure_logging
 from .models import (
     Clip,
     Job,
     LedgerEntry,
     MetricEvent,
-    Publication,
     RightsRecord,
     Source,
     WorkflowRun,
 )
+from .oauth_routes import router as oauth_router
+from .publication_routes import router as publication_router
+from .publications import latest_rights, lock_source
 from .rate_limit import async_redis_limited, close_redis_clients, redis_ready
-from .rights import can_ingest_and_publish, can_publish_to
+from .rights import can_ingest_and_publish
+from .scheduler import authorized_media, enqueue_processing
 from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_media_path
 
 
@@ -78,7 +88,14 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"], expose_headers=["X-Request-ID"])
+app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"], expose_headers=["X-Request-ID"])
+
+app.include_router(oauth_router)
+app.include_router(publication_router)
+app.include_router(automation_router)
+app.include_router(library_router)
+app.include_router(revenue_routes.router)
+app.include_router(analytics_routes.router)
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -179,7 +196,7 @@ async def security_middleware(request: Request, call_next):
         "X-Request-ID": request_id,
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
-        "Referrer-Policy": "same-origin",
+        "Referrer-Policy": response.headers.get("Referrer-Policy", "same-origin"),
         "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
         "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
         "Cross-Origin-Opener-Policy": "same-origin",
@@ -268,9 +285,10 @@ def overview(db: Session = Depends(session), _: str = Depends(require_auth)) -> 
     counts = {}
     for label, model in (("sources", Source), ("clips", Clip), ("workflows", WorkflowRun)):
         counts[label] = db.scalar(select(func.count()).select_from(model)) or 0
-    revenue = db.scalar(select(func.coalesce(func.sum(LedgerEntry.cents), 0)).where(LedgerEntry.kind == "revenue", LedgerEntry.verified.is_(True))) or 0
-    expenses = db.scalar(select(func.coalesce(func.sum(LedgerEntry.cents), 0)).where(LedgerEntry.kind == "expense", LedgerEntry.verified.is_(True))) or 0
-    return {"environment": settings.env, "demo_mode": settings.demo_mode, "counts": counts, "revenue_cents": revenue, "expense_cents": expenses}
+    summary = revenue_routes.summarize(list(db.scalars(select(LedgerEntry))))
+    return {"environment": settings.env, "demo_mode": settings.demo_mode, "counts": counts,
+            "revenue_cents": summary["revenue_cents"]["total"], "expense_cents": summary["cost_cents"]["actual"],
+            "estimated_cost_cents": summary["cost_cents"]["estimated"], "revenue": summary}
 
 
 @app.post("/api/v1/sources/upload")
@@ -325,7 +343,9 @@ def list_sources(db: Session = Depends(session), _: str = Depends(require_auth))
 
 
 @app.post("/api/v1/sources/{source_id}/rights", status_code=201)
-def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), actor: str = Depends(require_auth)) -> dict:
+    lock_policy(db)
+    lock_source(db, source_id)
     source = db.get(Source, source_id)
     if not source:
         raise HTTPException(404, "source not found")
@@ -333,15 +353,27 @@ def create_rights(payload: RightsCreate, source_id: int = PathParam(gt=0, le=214
         raise HTTPException(422, "owned authorization requires an upload source")
     record = RightsRecord(source_id=source_id, **payload.model_dump())
     db.add(record)
-    source.status = "authorized" if can_ingest_and_publish(record) else "rights_review"
+    if can_ingest_and_publish(record):
+        if not authorized_media(source):
+            source.status = "awaiting_authorized_media"
+        elif not db.scalar(select(Clip.id).where(Clip.source_id == source.id).limit(1)):
+            source.status = "authorized"
+        else:
+            source.status = "analyzed"
+    else:
+        source.status = "rights_review"
+    db.flush()
+    audit(db, actor, "rights.record", "source", source_id, rights_id=record.id, authorized=can_ingest_and_publish(record))
     db.commit()
     return {"source_id": source_id, "status": source.status, "can_publish": can_ingest_and_publish(record)}
 
 
 @app.post("/api/v1/sources/{source_id}/process", status_code=202)
 def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
+    lock_policy(db)
+    lock_source(db, source_id)
     source = db.get(Source, source_id)
-    rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == source_id).order_by(RightsRecord.created_at.desc()))
+    rights = latest_rights(db, source_id)
     if not source or not rights:
         raise HTTPException(404, "source or rights record not found")
     if not can_ingest_and_publish(rights):
@@ -360,49 +392,13 @@ def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483
     existing = db.scalar(select(Job).where(Job.idempotency_key == key)) if key else None
     if existing and existing.source_id != source_id:
         raise HTTPException(409, "idempotency key already used")
-    referenced = db.scalar(
-        select(Publication.id)
-        .join(Clip, Clip.id == Publication.clip_id)
-        .where(Clip.source_id == source_id)
-        .limit(1)
-    )
-    if referenced:
-        raise HTTPException(409, "source reruns are disabled while publications reference its clips")
-    existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+    existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.kind == "process_source", Job.status.in_(ACTIVE)))
     if existing:
         return JSONResponse({"job_id": existing.id, "status": existing.status}, status_code=200)
-    run = WorkflowRun(source_id=source_id, state="queued")
-    try:
-        db.add(run)
-        db.flush()
-        job = Job(id=uuid4().hex, source_id=source_id, workflow_id=run.id, idempotency_key=key)
-        db.add(job)
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        job = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
-        if not job and key:
-            job = db.scalar(select(Job).where(Job.idempotency_key == key))
-        if not job or job.source_id != source_id:
-            raise HTTPException(409, "idempotency conflict") from None
+    check_source_idle(db, source_id, replace_qc=True)
+    job = enqueue_processing(db, source, idempotency_key=key)
+    db.commit()
     return {"job_id": job.id, "status": job.status}
-
-
-def job_read(job: Job) -> dict:
-    return {name: getattr(job, name) for name in ("id", "kind", "source_id", "status", "attempts", "max_attempts", "run_after", "last_error", "result", "created_at", "updated_at")}
-
-
-@app.get("/api/v1/jobs")
-def list_jobs(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
-    return [job_read(job) for job in db.scalars(select(Job).order_by(Job.created_at.desc()).limit(100))]
-
-
-@app.get("/api/v1/jobs/{job_id}")
-def get_job(job_id: str, db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
-    job = db.get(Job, job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
-    return job_read(job)
 
 
 @app.get("/api/v1/clips", response_model=list[ClipRead])
@@ -411,11 +407,13 @@ def list_clips(db: Session = Depends(session), _: str = Depends(require_auth)) -
 
 
 @app.get("/api/v1/clips/{clip_id}/download")
-def download_clip(clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
+def download_clip(clip_id: int = PathParam(gt=0, le=2147483647), inline: bool = False, db: Session = Depends(session), _: str = Depends(require_auth)) -> FileResponse:
     clip = db.get(Clip, clip_id)
     if not clip or not clip.output_path or not Path(clip.output_path).is_file():
         raise HTTPException(404, "rendered clip not found")
-    return FileResponse(clip.output_path, media_type="video/mp4", filename=Path(clip.output_path).name)
+    # Range requests (seeking in <video>) are served by FileResponse; inline disposition enables previews.
+    return FileResponse(clip.output_path, media_type="video/mp4", filename=Path(clip.output_path).name,
+                        content_disposition_type="inline" if inline else "attachment")
 
 
 @app.post("/api/v1/discovery/search")
@@ -427,43 +425,15 @@ def discover(platform: Literal["youtube", "twitch"], query: str = Query(min_leng
         items = asyncio.run(provider.search(query))
     except ProviderUnavailable as exc:
         raise HTTPException(exc.status_code, "service temporarily unavailable") from exc
+    lock_policy(db)
     created = 0
     for item in items:
         existing = db.scalar(select(Source).where(Source.external_id == item.external_id))
         if not existing:
-            db.add(Source(platform=item.platform, external_id=item.external_id, title=item.title, url=item.url, metadata_json=item.metadata))
+            db.add(Source(platform=item.platform, external_id=item.external_id, title=item.title, url=item.url, status="rights_review", metadata_json=item.metadata))
             created += 1
     db.commit()
     return {"provider": provider.__class__.__name__, "discovered": len(items), "created": created, "fixture": isinstance(provider, FixtureProvider)}
-
-
-@app.get("/api/v1/publications")
-def publications(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
-    rows = list(db.scalars(select(Publication).order_by(Publication.created_at.desc())).all())
-    return [{"id": row.id, "clip_id": row.clip_id, "platform": row.platform, "status": row.status, "external_id": row.external_id, "error": "publication failed" if row.error else None} for row in rows]
-
-
-@app.post("/api/v1/clips/{clip_id}/publish")
-def queue_publication(platform: Literal["youtube", "twitch", "tiktok", "instagram"], clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
-    if not settings.publishing_enabled:
-        raise HTTPException(409, "publishing is disabled by SOE_PUBLISHING_ENABLED")
-    clip = db.get(Clip, clip_id)
-    if not clip:
-        raise HTTPException(404, "clip not found")
-    rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == clip.source_id).order_by(RightsRecord.created_at.desc()))
-    if not rights or not can_publish_to(rights, platform):
-        raise HTTPException(403, "current rights do not authorize publication to this platform")
-    publication = db.scalar(select(Publication).where(Publication.clip_id == clip_id, Publication.platform == platform))
-    if publication:
-        return {"publication_id": publication.id, "status": publication.status}
-    publication = Publication(clip_id=clip_id, platform=platform, status="queued")
-    db.add(publication)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        publication = db.scalar(select(Publication).where(Publication.clip_id == clip_id, Publication.platform == platform))
-    return {"publication_id": publication.id, "status": publication.status}
 
 
 @app.get("/api/v1/analytics")
@@ -474,8 +444,8 @@ def analytics(db: Session = Depends(session), _: str = Depends(require_auth)) ->
 
 @app.get("/api/v1/revenue")
 def revenue(db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
-    entries = list(db.scalars(select(LedgerEntry).order_by(LedgerEntry.created_at.desc())).all())
-    return {"entries": [{"id": item.id, "kind": item.kind, "category": item.category, "cents": item.cents, "verified": item.verified, "note": item.note} for item in entries], "verified_only": True}
+    entries = list(db.scalars(select(LedgerEntry).order_by(LedgerEntry.created_at.desc(), LedgerEntry.id.desc())).all())
+    return {"entries": [revenue_routes.entry_read(item) for item in entries], "summary": revenue_routes.summarize(entries)}
 
 
 @app.get("/api/v1/agents")
@@ -496,7 +466,14 @@ def agents(db: Session = Depends(session), _: str = Depends(require_auth)) -> li
 
 @app.get("/api/v1/settings")
 def read_settings(_: str = Depends(require_auth)) -> dict:
-    return {"environment": settings.env, "demo_mode": settings.demo_mode, "whisper_model_size": settings.whisper_model_size, "publishing_enabled": settings.publishing_enabled, "max_upload_bytes": settings.max_upload_bytes, "max_clip_seconds": settings.max_clip_seconds, "configured_integrations": {"youtube": bool(settings.youtube_api_key), "twitch": bool(settings.twitch_client_id and settings.twitch_client_secret)}}
+    platforms = ("youtube", "tiktok", "instagram")
+    return {"environment": settings.env, "demo_mode": settings.demo_mode, "whisper_model_size": settings.whisper_model_size,
+            "publishing_enabled": settings.publishing_enabled, "publishing_dry_run": settings.publishing_dry_run,
+            "max_upload_bytes": settings.max_upload_bytes, "max_clip_seconds": settings.max_clip_seconds,
+            "configured_integrations": {"youtube": bool(settings.youtube_api_key), "twitch": bool(settings.twitch_client_id and settings.twitch_client_secret)},
+            "publishing_platforms": {platform: {"enabled": settings.publishing_allowed(platform),
+                                                "oauth_configured": all(settings.oauth_credentials(platform)) and bool(settings.oauth_origin())}
+                                     for platform in platforms}}
 
 
 @app.post("/api/v1/demo/pipeline")

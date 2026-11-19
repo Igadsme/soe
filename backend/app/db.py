@@ -9,7 +9,7 @@ url = settings.database_url
 if url.startswith("postgresql://"):
     url = url.replace("postgresql://", "postgresql+psycopg://", 1)
 
-engine = create_engine(url, future=True, pool_pre_ping=True)
+engine = create_engine(url, future=True, pool_pre_ping=True, hide_parameters=True)
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
 

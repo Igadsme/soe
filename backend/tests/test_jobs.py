@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from app import main, media, worker
+from app import main, media, media_tasks, worker
 from app.media import MediaProbe
 from app.models import AuthSession, Clip, Job, RightsRecord, Source, WorkflowRun, now
 from fastapi.testclient import TestClient
@@ -77,7 +77,8 @@ def test_concurrent_claim_and_lease_reclaim(queued, isolated_database):
     worker.fail_job(job_id, 'last')
     assert worker.claim_job('extra') is None
     with isolated_database() as db:
-        assert db.get(Job, job_id).status == 'failed'
+        # Exhausted jobs are dead-lettered for inspection/replay instead of silently failing.
+        assert db.get(Job, job_id).status == 'dead_letter'
         assert db.get(WorkflowRun, db.get(Job, job_id).workflow_id).state == 'failed'
 
 
@@ -91,7 +92,8 @@ def test_crash_at_last_attempt(queued, isolated_database):
         db.commit()
     assert worker.claim_job('new') is None
     with isolated_database() as db:
-        assert db.get(Job, job_id).status == 'failed'
+        # Exhausted jobs are dead-lettered for inspection/replay instead of silently failing.
+        assert db.get(Job, job_id).status == 'dead_letter'
 
 
 def stub_media(monkeypatch):
@@ -103,6 +105,17 @@ def stub_media(monkeypatch):
     monkeypatch.setattr(worker, 'FasterWhisperTranscriber', lambda _: SimpleNamespace(transcribe=lambda path: ['segment']))
     monkeypatch.setattr(worker, 'extract_candidates', lambda *a, **k: [SimpleNamespace(start=0, end=5, description='words', hook='hook', score=90, evidence={})])
     monkeypatch.setattr(worker, 'render_vertical', lambda *args: args[1].write_bytes(b'output'))
+    in_process_media(monkeypatch)
+
+
+def in_process_media(monkeypatch, duration=30):
+    # Production runs media work in a killable spawned child (covered by test_media_child_*).
+    # Monkeypatched stubs do not cross a spawn boundary, so orchestration tests run the same
+    # target functions in-process.
+    async def runner(target, args, result_file):
+        return await asyncio.to_thread(target, *args)
+    monkeypatch.setattr(worker, 'run_media_task', runner)
+    monkeypatch.setattr(media_tasks, 'probe', lambda *a, **k: MediaProbe(duration, 100, 100, True))
 
 
 def test_processing_idempotence_and_fencing(queued, isolated_database, monkeypatch):
@@ -128,8 +141,9 @@ def test_processing_idempotence_and_fencing(queued, isolated_database, monkeypat
 @pytest.mark.asyncio
 async def test_process_once_failure_then_success(queued, isolated_database, monkeypatch):
     job_id = enqueue(queued)
-    real_process_job = worker.process_job
-    monkeypatch.setattr(worker, 'process_job', lambda *a: (_ for _ in ()).throw(RuntimeError('secret')))
+    real_process_job = worker.execute_media
+    async def broken(*a): raise RuntimeError('secret')
+    monkeypatch.setattr(worker, 'execute_media', broken)
     assert await worker.process_once() == 1
     assert await worker.process_once() == 0
     with isolated_database() as db:
@@ -137,7 +151,7 @@ async def test_process_once_failure_then_success(queued, isolated_database, monk
         assert 'secret' not in job.last_error
         job.run_after = now() - timedelta(seconds=1)
         db.commit()
-    monkeypatch.setattr(worker, 'process_job', real_process_job)
+    monkeypatch.setattr(worker, 'execute_media', real_process_job)
     stub_media(monkeypatch)
     assert await worker.process_once() == 1
 
@@ -238,15 +252,21 @@ def test_postgres_claim_uses_skip_locked(queued, isolated_database, monkeypatch)
             self.db = isolated_database()
             return self
         def __exit__(self, *args): self.db.close()
-        def scalars(self, query): return self.db.scalars(query)
+        def scalars(self, query):
+            queries.append(str(query.compile(dialect=postgresql.dialect())))
+            return self.db.scalars(query)
         def scalar(self, query):
             queries.append(str(query.compile(dialect=postgresql.dialect())))
             return self.db.scalar(query)
         def execute(self, query): return self.db.execute(query)
+        def get(self, *args, **kwargs): return self.db.get(*args, **kwargs)
         def commit(self): self.db.commit()
+    real_lock_policy = worker.lock_policy
+    # The singleton policy upsert is dialect-specific; run it on the real SQLite session.
+    monkeypatch.setattr(worker, 'lock_policy', lambda db: real_lock_policy(db.db))
     monkeypatch.setattr(worker, 'SessionLocal', PostgresClaimSession)
     assert worker.claim_job('postgres-owner') == job_id
-    assert 'FOR UPDATE SKIP LOCKED' in queries[0]
+    assert queries and all('FOR UPDATE SKIP LOCKED' in query for query in queries)
 
 
 @pytest.mark.asyncio
@@ -260,8 +280,8 @@ async def test_process_once_renews_during_long_work(queued, monkeypatch):
     monkeypatch.setattr(worker, 'LEASE_SECONDS', 0.12)
     monkeypatch.setattr(worker, 'renew_lease', renew)
     monkeypatch.setattr(worker.Path, 'touch', lambda self: None)
-    def slow(*args): time.sleep(0.15)
-    monkeypatch.setattr(worker, 'process_job', slow)
+    async def slow(*args): await asyncio.to_thread(time.sleep, 0.15)
+    monkeypatch.setattr(worker, 'execute_media', slow)
     assert await worker.process_once() == 1
     assert renewals
 
@@ -280,8 +300,8 @@ async def test_processing_deadline_stops_renewal_and_requeues(queued, isolated_d
         renewals.append(args)
         original_renew(*args)
     monkeypatch.setattr(worker, 'renew_lease', renew)
-    def hanging(*args): time.sleep(0.2)
-    monkeypatch.setattr(worker, 'process_job', hanging)
+    async def hanging(*args): await asyncio.to_thread(time.sleep, 0.2)
+    monkeypatch.setattr(worker, 'execute_media', hanging)
     assert await worker.process_once() == 1
     assert not renewals
     with isolated_database() as db:

@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from starlette.responses import Response
 
 from .config import secret_value, settings
+from .logging_config import redact
 from .models import Job
 
 REQUESTS = Counter("soe_http_requests_total", "HTTP requests", ["method", "route", "status"])
@@ -40,6 +41,8 @@ def scrub_event(event, hint=None):
     event.pop("breadcrumbs", None)
     event.pop("user", None)
     for exception in event.get("exception", {}).get("values", []):
+        if isinstance(exception.get("value"), str):
+            exception["value"] = redact(exception["value"])
         for frame in exception.get("stacktrace", {}).get("frames", []):
             frame.pop("vars", None)
     return event
@@ -50,8 +53,11 @@ def init_sentry():
         return
     import sentry_sdk
     from sentry_sdk.integrations.fastapi import FastApiIntegration
+    from sentry_sdk.integrations.httpx import HttpxIntegration
     sentry_sdk.init(
         dsn=secret_value(settings.sentry_dsn), integrations=[FastApiIntegration()],
+        # HTTPX tracing can export signed provider upload URLs before event scrubbing.
+        disabled_integrations=[HttpxIntegration()],
         send_default_pii=False, traces_sample_rate=settings.sentry_traces_sample_rate,
         environment=settings.env, before_send=scrub_event,
         before_send_transaction=scrub_event, include_local_variables=False,
@@ -112,7 +118,7 @@ def metrics_response(request: Request, db):
     # Query at scrape time instead of summing duplicate queue snapshots per worker.
     jobs = GaugeMetricFamily("soe_jobs", "Persisted jobs by status", labels=["status"])
     counts = dict(db.execute(select(Job.status, func.count()).group_by(Job.status)).all())
-    for status in ("queued", "running", "succeeded", "failed"):
+    for status in ("queued", "running", "cancel_requested", "succeeded", "failed", "dead_letter", "cancelled"):
         jobs.add_metric([status], counts.get(status, 0))
     queue_registry = CollectorRegistry()
     class QueueCollector:
@@ -120,3 +126,6 @@ def metrics_response(request: Request, db):
             yield jobs
     queue_registry.register(QueueCollector())
     return Response(generate_latest(registry) + generate_latest(queue_registry), media_type=CONTENT_TYPE_LATEST)
+
+
+JOB_RECLAIMED = Counter("soe_job_reclaimed_total", "Stuck jobs reclaimed", ["kind", "reason"])

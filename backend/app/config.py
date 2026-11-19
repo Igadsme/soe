@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,6 +14,21 @@ class Settings(BaseSettings):
     ffmpeg_timeout_seconds: float = 300
     processing_deadline_floor_seconds: float = Field(default=300, ge=1)
     processing_deadline_duration_multiplier: float = Field(default=5, ge=1)
+    media_terminate_grace_seconds: float = Field(default=1, gt=0, le=10)
+    workflow_timeout_seconds: int = Field(default=21600, ge=60)
+    scheduler_interval_seconds: int = Field(default=15, ge=1)
+    analytics_interval_minutes: int = Field(default=1440, ge=1)
+    learner_min_samples: int = Field(default=30, ge=5, le=100000)
+    signal_sample_fps: float = Field(default=2, gt=0, le=10)
+    signal_max_frames_per_hour: int = Field(default=7200, ge=60, le=108000)
+    highlight_min_seconds: float = Field(default=4, gt=0)
+    highlight_target_max_seconds: float = Field(default=45, gt=0)
+    loudness_target_lufs: float = Field(default=-14, ge=-31, le=-5)
+    edit_template: str = Field(default="clean", pattern=r"^(clean|bold_captions|gameplay_focus)$")
+    brand_text: str = Field(default="", max_length=60)
+    processing_cents_per_minute: float = Field(default=1, ge=0, le=100000, allow_inf_nan=False)
+    qc_min_clip_seconds: float = Field(default=1, gt=0)
+    qc_min_mean_db: float = Field(default=-50, ge=-90, le=0)
     max_source_seconds: float = 3600
     whisper_cache_dir: str = "/app/.cache/whisper"
     media_root: str = "./media"
@@ -22,6 +38,23 @@ class Settings(BaseSettings):
     twitch_client_id: str = ""
     twitch_client_secret: SecretStr = SecretStr("")
     publishing_enabled: bool = False
+    publish_youtube_enabled: bool = False
+    publish_tiktok_enabled: bool = False
+    publish_instagram_enabled: bool = False
+    publishing_dry_run: bool = False
+    token_encryption_keys: SecretStr = SecretStr("")
+    google_client_id: SecretStr = SecretStr("")
+    google_client_secret: SecretStr = SecretStr("")
+    tiktok_client_key: SecretStr = SecretStr("")
+    tiktok_client_secret: SecretStr = SecretStr("")
+    meta_app_id: SecretStr = SecretStr("")
+    meta_app_secret: SecretStr = SecretStr("")
+    oauth_redirect_base: SecretStr = SecretStr("")
+    meta_graph_version: str = Field(default="v26.0", pattern=r"^v[0-9]{2}\.0$")
+    tiktok_app_audited: bool = False
+    youtube_upload_chunk_bytes: int = Field(default=8 * 1024**2, ge=256 * 1024, le=64 * 1024**2, multiple_of=256 * 1024)
+    publishing_max_attempts: int = Field(default=5, ge=1, le=10)
+    publishing_deadline_seconds: int = Field(default=900, ge=1)
     whisper_model_size: str = "tiny.en"
     admin_username: str = "operator"
     admin_password: SecretStr = SecretStr("")
@@ -46,6 +79,32 @@ class Settings(BaseSettings):
             raise ValueError("unknown SOE_ENV")
         return value
 
+    def oauth_credentials(self, platform: str) -> tuple[str, str]:
+        attributes = {
+            "youtube": ("google_client_id", "google_client_secret"),
+            "tiktok": ("tiktok_client_key", "tiktok_client_secret"),
+            "instagram": ("meta_app_id", "meta_app_secret"),
+        }
+        identifier, secret = attributes[platform]
+        return secret_value(getattr(self, identifier)).strip(), secret_value(getattr(self, secret)).strip()
+
+    def oauth_origin(self) -> str:
+        value = secret_value(self.oauth_redirect_base).strip().rstrip("/")
+        try:
+            parts = urlsplit(value)
+            if parts.username is not None or not parts.hostname or parts.path or parts.query or parts.fragment:
+                return ""
+            if parts.scheme == "https" or (
+                self.env in {"development", "test"} and parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1"}
+            ):
+                return value
+        except ValueError:
+            return ""
+        return ""
+
+    def publishing_allowed(self, platform: str) -> bool:
+        return self.publishing_enabled and getattr(self, f"publish_{platform}_enabled", False)
+
     def validate_production(self) -> None:
         """Reject unsafe production settings without including their values in errors."""
         if self.env not in {"production", "staging"}:
@@ -55,8 +114,15 @@ class Settings(BaseSettings):
             errors.append("SOE_ADMIN_PASSWORD is forbidden; use SOE_ADMIN_PASSWORD_HASH")
         if self.metrics_enabled and not secret_value(self.metrics_token).strip():
             errors.append("SOE_METRICS_TOKEN is required when metrics are enabled")
-        if self.publishing_enabled:
-            errors.append("SOE_PUBLISHING_ENABLED must be false until media publishing is implemented")
+        clients = [self.oauth_credentials(platform) for platform in ("youtube", "tiktok", "instagram")]
+        if self.publishing_enabled and not (self.oauth_origin() and any(all(client) for client in clients)):
+            errors.append("SOE_PUBLISHING_ENABLED requires a configured OAuth client and HTTPS SOE_OAUTH_REDIRECT_BASE")
+        if self.publishing_enabled or any(any(client) for client in clients) or self.token_encryption_keys:
+            from .token_vault import keyring
+            try:
+                keyring(secret_value(self.token_encryption_keys))
+            except ValueError:
+                errors.append("SOE_TOKEN_ENCRYPTION_KEYS must contain valid Fernet keys")
         if len(secret_value(self.session_secret).strip()) < 32:
             errors.append("SOE_SESSION_SECRET must contain at least 32 characters")
         if not secret_value(self.admin_password_hash).strip():
@@ -73,7 +139,7 @@ class Settings(BaseSettings):
         if errors:
             raise RuntimeError("Invalid production configuration: " + "; ".join(errors))
 
-    model_config = SettingsConfigDict(env_prefix="SOE_", env_file=os.environ.get("SOE_ENV_FILE", ".env"), extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="SOE_", env_file=os.environ.get("SOE_ENV_FILE", ".env"), extra="ignore", env_ignore_empty=True)
 
 
 settings = Settings()
