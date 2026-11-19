@@ -26,6 +26,9 @@ from .models import (
 )
 from .observability import JOB_DEADLINE_EXCEEDED
 from .pipeline import extract_candidates
+from .publication_worker import PublisherJob
+from .publications import recover_expired
+from .publishing import PublishingUnavailable
 from .rights import can_ingest_and_publish
 from .schemas import safe_media_path
 from .subtitles import srt_timestamp
@@ -48,14 +51,19 @@ def claim_job(worker_id: str) -> str | None:
     with SessionLocal() as db:
         # Expired claims consume an attempt, including crashes on the final attempt.
         expired = (Job.status == "running") & (Job.lease_expires_at <= timestamp)
-        exhausted = list(db.scalars(select(Job).where(expired, Job.attempts >= Job.max_attempts)))
-        for job in exhausted:
-            changed = db.execute(update(Job).execution_options(synchronize_session=False).where(Job.id == job.id, expired).values(status="failed", locked_by=None, lease_expires_at=None, last_error="worker lease expired"))
+        expired_jobs = list(db.scalars(select(Job).where(expired)))
+        for job in expired_jobs:
+            exhausted = job.attempts >= job.max_attempts
+            changed = db.execute(update(Job).execution_options(synchronize_session=False).where(Job.id == job.id, expired).values(
+                status="failed" if exhausted else "queued", locked_by=None, lease_expires_at=None, last_error="worker lease expired",
+            ))
             if changed.rowcount:
-                db.execute(update(WorkflowRun).where(WorkflowRun.id == job.workflow_id).values(state="failed", error="worker lease expired"))
-        retry_ids = select(Job.workflow_id).where(expired, Job.attempts < Job.max_attempts)
-        db.execute(update(WorkflowRun).where(WorkflowRun.id.in_(retry_ids)).values(state="queued", error="worker lease expired"))
-        db.execute(update(Job).execution_options(synchronize_session=False).where(expired, Job.attempts < Job.max_attempts).values(status="queued", locked_by=None, lease_expires_at=None))
+                if job.kind == "publish":
+                    recover_expired(db, job, exhausted)
+                else:
+                    db.execute(update(WorkflowRun).where(WorkflowRun.id == job.workflow_id).values(
+                        state="failed" if exhausted else "queued", error="worker lease expired",
+                    ))
         query = select(Job.id).where(Job.status == "queued", Job.run_after <= timestamp, Job.attempts < Job.max_attempts).order_by(Job.created_at).limit(1)
         if db.bind.dialect.name == "postgresql":
             query = query.with_for_update(skip_locked=True)
@@ -170,9 +178,13 @@ async def process_once() -> int:
     if not job_id:
         return 0
     deadline = settings.processing_deadline_floor_seconds
+    publisher = None
     with SessionLocal() as db:
         job = db.get(Job, job_id)
-        if job:
+        if job and job.kind == "publish":
+            publisher = PublisherJob(SessionLocal, lambda: owned(job_id, worker_id))
+            deadline = settings.publishing_deadline_seconds
+        elif job:
             source = db.get(Source, job.source_id)
             if source and source.media_path:
                 try:
@@ -181,14 +193,19 @@ async def process_once() -> int:
                     deadline = max(settings.processing_deadline_floor_seconds, settings.processing_deadline_duration_multiplier * duration)
                 except Exception:
                     logger.warning("job_deadline_probe_failed", extra={"job_id": job_id})
-    task = asyncio.create_task(asyncio.to_thread(process_job, job_id, worker_id))
+    task = asyncio.create_task(publisher.execute() if publisher else asyncio.to_thread(process_job, job_id, worker_id))
     started = time.monotonic()
     try:
         while not task.done():
             remaining = deadline - (time.monotonic() - started)
             if remaining <= 0:
-                await asyncio.to_thread(fail_job, job_id, worker_id, "processing deadline exceeded")
-                task.cancel()
+                if publisher:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    publisher.finish(error=PublishingUnavailable("transient", "Publishing deadline exceeded"))
+                else:
+                    await asyncio.to_thread(fail_job, job_id, worker_id, "processing deadline exceeded")
+                    task.cancel()
                 JOB_DEADLINE_EXCEEDED.inc()
                 logger.warning("job_processing_deadline_exceeded", extra={"job_id": job_id, "deadline_seconds": round(deadline, 2)})
                 break
@@ -201,10 +218,14 @@ async def process_once() -> int:
             return 1
         await task
     except Exception:
-        import sentry_sdk
-        sentry_sdk.capture_exception()
-        await asyncio.to_thread(fail_job, job_id, worker_id)
-        logger.error("job_processing_failed")
+        if publisher:
+            publisher.finish(error=PublishingUnavailable("transient", "Publishing job interrupted"))
+            logger.error("publication_job_failed", extra={"job_id": job_id})
+        else:
+            import sentry_sdk
+            sentry_sdk.capture_exception()
+            await asyncio.to_thread(fail_job, job_id, worker_id)
+            logger.error("job_processing_failed")
     return 1
 
 

@@ -121,20 +121,21 @@ async def test_official_adapters(mock_http, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_publishers(mock_http, tmp_path):
-    path = tmp_path/'clip.mp4'
-    path.write_bytes(b'video')
-    for platform, publisher, method, args in [
-        ('youtube', publishing.YouTubePublisher(), 'upload', (path, 'title', 'description')),
-        ('tiktok', publishing.TikTokPublisher(), 'initialize_direct_post', ('title', 5)),
-        ('instagram', publishing.InstagramPublisher(), 'create_reel_container', ('https://example.com/video', 'caption')),
-    ]:
-        call = getattr(publisher, method)
-        with pytest.raises(publishing.PublishingUnavailable): await call(publishing.OAuthAccount('wrong', '', ''), *args)
-        for code in [401, 403]:
-            mock_http(lambda request: httpx.Response(code))
-            with pytest.raises(publishing.PublishingUnavailable): await call(publishing.OAuthAccount(platform, 'fake-token', 'id'), *args)
-        mock_http(lambda request: httpx.Response(200, json={'id': 'published'}))
-        response = await call(publishing.OAuthAccount(platform, 'fake-token', 'id'), *args)
-        assert response == ('published' if platform == 'youtube' else {'id': 'published'})
-    with pytest.raises(publishing.PublishingUnavailable):
-        await publishing.YouTubePublisher().upload(publishing.OAuthAccount('youtube', '', ''), tmp_path/'missing', '', '')
+    """Provider contract errors through the authenticated HTTP boundary."""
+    for code, expected in [(401, "auth_revoked"), (403, "permission")]:
+        mock_http(lambda request: httpx.Response(code))
+        async def refresh():
+            return "fixture-refreshed"
+        async with publishing.provider_client() as client:
+            provider = publishing.PublishClient(client, "fixture-access", lambda: None, refresh)
+            for url in (
+                "https://www.googleapis.com/upload/youtube/v3/videos",
+                "https://open.tiktokapis.com/v2/post/publish/video/init/",
+                "https://graph.facebook.com/v26.0/123/media",
+            ):
+                provider.refreshed = False
+                with pytest.raises(publishing.PublishingUnavailable) as error:
+                    await provider.request("POST", url)
+                assert error.value.error_class == expected
+    with pytest.raises(publishing.PublishingUnavailable, match="private or unlisted"):
+        publishing.validate_metadata("youtube", "title", "description", "public")

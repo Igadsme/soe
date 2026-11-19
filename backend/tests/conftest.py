@@ -9,6 +9,10 @@ for name, value in {
     "ADMIN_PASSWORD_HASH": "", "SESSION_SECRET": "", "REDIS_URL": "",
     "YOUTUBE_API_KEY": "", "TWITCH_CLIENT_ID": "", "TWITCH_CLIENT_SECRET": "",
     "PUBLISHING_ENABLED": "false", "CORS_ORIGINS": "http://localhost:3000",
+    "PUBLISH_YOUTUBE_ENABLED": "false", "PUBLISH_TIKTOK_ENABLED": "false", "PUBLISH_INSTAGRAM_ENABLED": "false",
+    "PUBLISHING_DRY_RUN": "false", "TIKTOK_APP_AUDITED": "false", "TOKEN_ENCRYPTION_KEYS": "", "OAUTH_REDIRECT_BASE": "",
+    "GOOGLE_CLIENT_ID": "", "GOOGLE_CLIENT_SECRET": "", "TIKTOK_CLIENT_KEY": "", "TIKTOK_CLIENT_SECRET": "",
+    "META_APP_ID": "", "META_APP_SECRET": "",
     "RATE_LIMIT_PER_MINUTE": "120", "TRUSTED_PROXIES": "",
 }.items():
     os.environ["SOE_" + name] = value

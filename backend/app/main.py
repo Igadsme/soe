@@ -58,8 +58,11 @@ from .models import (
     Source,
     WorkflowRun,
 )
+from .oauth_routes import router as oauth_router
+from .publication_routes import router as publication_router
+from .publications import lock_source
 from .rate_limit import async_redis_limited, close_redis_clients, redis_ready
-from .rights import can_ingest_and_publish, can_publish_to
+from .rights import can_ingest_and_publish
 from .schemas import ClipRead, RightsCreate, SourceCreate, SourceRead, safe_media_path
 
 
@@ -79,6 +82,9 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Soe API", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()], allow_credentials=bool(settings.cors_origins.strip()), allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID", "Idempotency-Key"], expose_headers=["X-Request-ID"])
+
+app.include_router(oauth_router)
+app.include_router(publication_router)
 
 _rate_windows: dict[str, deque[float]] = defaultdict(deque)
 _login_windows: dict[str, deque[float]] = defaultdict(deque)
@@ -179,7 +185,7 @@ async def security_middleware(request: Request, call_next):
         "X-Request-ID": request_id,
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
-        "Referrer-Policy": "same-origin",
+        "Referrer-Policy": response.headers.get("Referrer-Policy", "same-origin"),
         "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
         "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
         "Cross-Origin-Opener-Policy": "same-origin",
@@ -360,6 +366,7 @@ def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483
     existing = db.scalar(select(Job).where(Job.idempotency_key == key)) if key else None
     if existing and existing.source_id != source_id:
         raise HTTPException(409, "idempotency key already used")
+    lock_source(db, source_id)
     referenced = db.scalar(
         select(Publication.id)
         .join(Clip, Clip.id == Publication.clip_id)
@@ -368,7 +375,7 @@ def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483
     )
     if referenced:
         raise HTTPException(409, "source reruns are disabled while publications reference its clips")
-    existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+    existing = existing or db.scalar(select(Job).where(Job.source_id == source_id, Job.kind == "process_source", Job.status.in_(["queued", "running"])))
     if existing:
         return JSONResponse({"job_id": existing.id, "status": existing.status}, status_code=200)
     run = WorkflowRun(source_id=source_id, state="queued")
@@ -380,7 +387,7 @@ def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483
         db.commit()
     except IntegrityError:
         db.rollback()
-        job = db.scalar(select(Job).where(Job.source_id == source_id, Job.status.in_(["queued", "running"])))
+        job = db.scalar(select(Job).where(Job.source_id == source_id, Job.kind == "process_source", Job.status.in_(["queued", "running"])))
         if not job and key:
             job = db.scalar(select(Job).where(Job.idempotency_key == key))
         if not job or job.source_id != source_id:
@@ -389,7 +396,7 @@ def process_source(request: Request, source_id: int = PathParam(gt=0, le=2147483
 
 
 def job_read(job: Job) -> dict:
-    return {name: getattr(job, name) for name in ("id", "kind", "source_id", "status", "attempts", "max_attempts", "run_after", "last_error", "result", "created_at", "updated_at")}
+    return {name: getattr(job, name) for name in ("id", "kind", "source_id", "publication_id", "status", "attempts", "max_attempts", "run_after", "last_error", "result", "created_at", "updated_at")}
 
 
 @app.get("/api/v1/jobs")
@@ -435,35 +442,6 @@ def discover(platform: Literal["youtube", "twitch"], query: str = Query(min_leng
             created += 1
     db.commit()
     return {"provider": provider.__class__.__name__, "discovered": len(items), "created": created, "fixture": isinstance(provider, FixtureProvider)}
-
-
-@app.get("/api/v1/publications")
-def publications(db: Session = Depends(session), _: str = Depends(require_auth)) -> list[dict]:
-    rows = list(db.scalars(select(Publication).order_by(Publication.created_at.desc())).all())
-    return [{"id": row.id, "clip_id": row.clip_id, "platform": row.platform, "status": row.status, "external_id": row.external_id, "error": "publication failed" if row.error else None} for row in rows]
-
-
-@app.post("/api/v1/clips/{clip_id}/publish")
-def queue_publication(platform: Literal["youtube", "twitch", "tiktok", "instagram"], clip_id: int = PathParam(gt=0, le=2147483647), db: Session = Depends(session), _: str = Depends(require_auth)) -> dict:
-    if not settings.publishing_enabled:
-        raise HTTPException(409, "publishing is disabled by SOE_PUBLISHING_ENABLED")
-    clip = db.get(Clip, clip_id)
-    if not clip:
-        raise HTTPException(404, "clip not found")
-    rights = db.scalar(select(RightsRecord).where(RightsRecord.source_id == clip.source_id).order_by(RightsRecord.created_at.desc()))
-    if not rights or not can_publish_to(rights, platform):
-        raise HTTPException(403, "current rights do not authorize publication to this platform")
-    publication = db.scalar(select(Publication).where(Publication.clip_id == clip_id, Publication.platform == platform))
-    if publication:
-        return {"publication_id": publication.id, "status": publication.status}
-    publication = Publication(clip_id=clip_id, platform=platform, status="queued")
-    db.add(publication)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        publication = db.scalar(select(Publication).where(Publication.clip_id == clip_id, Publication.platform == platform))
-    return {"publication_id": publication.id, "status": publication.status}
 
 
 @app.get("/api/v1/analytics")

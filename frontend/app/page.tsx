@@ -23,7 +23,18 @@ export default function Home() {
   const [error, setError] = useState("");
   const [panelData, setPanelData] = useState<unknown>(null);
   const refresh = async () => { try { const [overview, sourceRows, clipRows] = await Promise.all([apiFetch(`${api}/api/v1/overview`).then((r) => r.json()), apiFetch(`${api}/api/v1/sources`).then((r) => r.json()), apiFetch(`${api}/api/v1/clips`).then((r) => r.json())]); setData(overview); setSources(sourceRows); setClips(clipRows); } catch { setError("Unable to load API data. Sign in or check the API connection."); } };
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("view") === "settings") {
+      setSection("Settings");
+      const result = url.searchParams.get("oauth");
+      if (result === "success") setMessage("Publishing account connected.");
+      if (result === "failure") setError("Publishing account connection failed. Start the connection again.");
+      for (const key of ["view", "oauth", "platform"]) url.searchParams.delete(key);
+      window.history.replaceState(window.history.state, "", url);
+    }
+  }, []);
   useEffect(() => { const routes: Record<string, string> = { Publishing: "/api/v1/publications", Analytics: "/api/v1/analytics", Revenue: "/api/v1/revenue", "AI agents": "/api/v1/agents", Settings: "/api/v1/settings" }; if (routes[section]) apiFetch(`${api}${routes[section]}`).then((r) => r.json()).then(setPanelData).catch(() => setError(`Unable to load ${section}.`)); }, [section]);
   const discover = async (event: FormEvent) => { event.preventDefault(); setError(""); const result = await apiFetch(`${api}/api/v1/discovery/search?platform=youtube&query=${encodeURIComponent(query)}`, { method: "POST" }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Discovery failed"); else { setMessage(`${body.created} new sources recorded by ${body.provider}.`); refresh(); } };
   const upload = async (event: FormEvent) => { event.preventDefault(); if (!file) return; const form = new FormData(); form.append("file", file); form.append("title", title); const result = await apiFetch(`${api}/api/v1/sources/upload`, { method: "POST", body: form }); const body = await result.json(); if (!result.ok) setError(body.detail ?? "Upload failed"); else { setSelectedSource(body.source_id); setMessage(`Upload accepted as source ${body.source_id}. Add rights approval before processing.`); refresh(); } };

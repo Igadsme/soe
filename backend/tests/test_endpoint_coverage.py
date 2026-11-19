@@ -3,29 +3,37 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app import main
-from app.models import Clip, LedgerEntry, MetricEvent, Publication, RightsRecord, Source
+from app.models import ConnectedAccount, Clip, LedgerEntry, MetricEvent, Publication, RightsRecord, Source
 
 
-def test_panels_and_publish_rights(isolated_database, monkeypatch):
+def test_panels_and_publish_rights(isolated_database, monkeypatch, tmp_path):
     monkeypatch.setattr(main.settings, 'publishing_enabled', True)
+    monkeypatch.setattr(main.settings, 'publish_youtube_enabled', True)
+    monkeypatch.setattr(main.settings, 'publish_tiktok_enabled', True)
+    path = tmp_path / 'media' / 'render.mp4'
+    path.parent.mkdir()
+    path.write_bytes(b'video')
     with isolated_database() as db:
         source = Source(platform='upload', external_id='panels', title='Title', url='https://example.com')
         db.add(source)
         db.flush()
-        clip = Clip(source_id=source.id, start_seconds=0, end_seconds=10, description='Test', hook='Hook', score=90)
+        clip = Clip(source_id=source.id, start_seconds=0, end_seconds=10, description='Test', hook='Hook', score=90, status='rendered', output_path=str(path))
         db.add(clip)
         db.flush()
         clip_id, source_id = clip.id, source.id
         db.add_all([MetricEvent(publication_id=1, metric='views', value=10, verified=True), MetricEvent(publication_id=1, metric='likes', value=2, verified=False), LedgerEntry(kind='revenue', category='ads', cents=100, verified=True, note='verified'), LedgerEntry(kind='expense', category='compute', cents=5, note='expense'), Publication(clip_id=clip.id, platform='youtube', error='private provider error')])
+        account = ConnectedAccount(platform='youtube', external_account_id='account', display_name='Account')
+        db.add(account)
         db.commit()
+        payload = {'platform': 'youtube', 'account_id': account.id}
     with TestClient(main.app) as client:
-        assert client.post('/api/v1/clips/999/publish?platform=youtube').status_code == 404
-        assert client.post(f'/api/v1/clips/{clip_id}/publish?platform=youtube').status_code == 403
+        assert client.post('/api/v1/clips/999/publish', json=payload).status_code == 404
+        assert client.post(f'/api/v1/clips/{clip_id}/publish', json=payload).status_code == 403
         with isolated_database() as db:
             db.add(RightsRecord(source_id=source_id, authorization_type='owned', commercial_use=True, publishing_allowed=True, allowed_platforms=['youtube'], evidence='test rights'))
             db.commit()
-        assert client.post(f'/api/v1/clips/{clip_id}/publish?platform=tiktok').status_code == 403
-        assert client.post(f'/api/v1/clips/{clip_id}/publish?platform=youtube').json()['status'] == 'queued'
+        assert client.post(f'/api/v1/clips/{clip_id}/publish', json={**payload, 'platform': 'tiktok'}).status_code == 403
+        assert client.post(f'/api/v1/clips/{clip_id}/publish', json=payload).json()['status'] == 'queued'
         assert client.get('/api/v1/publications').json()[-1]['error'] == 'publication failed'
         analytics = client.get('/api/v1/analytics').json()
         assert analytics['verified'][0]['value'] == 10 and analytics['unverified'][0]['value'] == 2
@@ -34,7 +42,7 @@ def test_panels_and_publish_rights(isolated_database, monkeypatch):
         assert client.get('/api/v1/settings').json()['publishing_enabled']
         assert client.get('/api/v1/agents').status_code == 200
         monkeypatch.setattr(main.settings, 'publishing_enabled', False)
-        assert client.post(f'/api/v1/clips/{clip_id}/publish?platform=youtube').status_code == 409
+        assert client.post(f'/api/v1/clips/{clip_id}/publish', json=payload).status_code == 409
 
 
 def test_discovery_status_and_unavailable(monkeypatch):
@@ -56,7 +64,7 @@ def test_discovery_status_and_unavailable(monkeypatch):
 def test_ready_independent_of_cwd(isolated_database, tmp_path, monkeypatch):
     with isolated_database() as db:
         db.execute(text('CREATE TABLE alembic_version (version_num VARCHAR(32))'))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0007_schema_hardening')"))
+        db.execute(text("INSERT INTO alembic_version VALUES ('0008_publishing')"))
         db.commit()
     monkeypatch.chdir(tmp_path)
     with TestClient(main.app) as client:

@@ -77,17 +77,21 @@ async def test_brute_force_limit_and_generic_error(client):
     assert response.status_code == 429 and int(response.headers["Retry-After"]) > 0
 
 
+def http_routes():
+    # OpenAPI flattens included FastAPI routers into their effective paths.
+    for path, methods in main.app.openapi()["paths"].items():
+        url = re.sub(r"\{[^}]+\}", "1", path.replace("{platform}", "youtube"))
+        yield path, url, {method.upper() for method in methods}
+
+
 @pytest.mark.asyncio
 async def test_all_routes_require_auth(client):
     public = {"/health", "/ready", "/api/v1/auth/login"}
-    for route in main.app.routes:
-        if route.path == "/metrics":
-            assert (await client.get("/metrics")).status_code == 404
+    assert (await client.get("/metrics")).status_code == 404
+    for path, url, methods in http_routes():
+        if path in public or path == "/metrics":
             continue
-        if route.path in public:
-            continue
-        url = re.sub(r"\{[^}]+\}", "1", route.path)
-        for method in route.methods:
+        for method in methods:
             response = await client.request(method, url)
             assert response.status_code == 401, (method, url, response.text)
 
@@ -95,11 +99,10 @@ async def test_all_routes_require_auth(client):
 @pytest.mark.asyncio
 async def test_all_mutations_require_csrf(client):
     await sign_in(client)
-    for route in main.app.routes:
-        if route.path == "/api/v1/auth/login":
+    for path, url, methods in http_routes():
+        if path == "/api/v1/auth/login":
             continue
-        for method in route.methods & {"POST", "PUT", "PATCH", "DELETE"}:
-            url = re.sub(r"\{[^}]+\}", "1", route.path)
+        for method in methods & {"POST", "PUT", "PATCH", "DELETE"}:
             assert (await client.request(method, url)).status_code == 403, url
 
 
@@ -178,7 +181,7 @@ async def test_readiness_requires_migration_head(client, isolated_database):
     assert (await client.get("/ready")).status_code == 503
     with isolated_database() as db:
         db.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
-        db.execute(text("INSERT INTO alembic_version VALUES ('0007_schema_hardening')"))
+        db.execute(text("INSERT INTO alembic_version VALUES ('0008_publishing')"))
         db.commit()
     assert (await client.get("/ready")).json() == {"status": "ready", "service": "soe-api"}
     with isolated_database() as db:

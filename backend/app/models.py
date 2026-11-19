@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -82,16 +83,72 @@ class WorkflowRun(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+class ConnectedAccount(Base):
+    __tablename__ = "connected_accounts"
+    __table_args__ = (UniqueConstraint("platform", "external_account_id", name="uq_account_platform_external"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    platform: Mapped[str] = mapped_column(String(32))
+    external_account_id: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str] = mapped_column(String(500))
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    access_token: Mapped[str | None] = mapped_column(Text)
+    refresh_token: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), default="connected")
+    daily_upload_limit: Mapped[int] = mapped_column(Integer, default=5)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class OAuthState(Base):
+    __tablename__ = "oauth_states"
+    state: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_binding: Mapped[str] = mapped_column(String(64))
+    platform: Mapped[str] = mapped_column(String(32))
+    code_verifier: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Publication(Base):
     __tablename__ = "publications"
-    __table_args__ = (UniqueConstraint("clip_id", "platform", name="uq_publication_clip_platform"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     clip_id: Mapped[int] = mapped_column(ForeignKey("clips.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("connected_accounts.id"), index=True)
     platform: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), default="queued")
-    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True)
+    media_sha256: Mapped[str | None] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(100), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    privacy_status: Mapped[str] = mapped_column(String(32), default="private")
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, default=0)
+    bytes_total: Mapped[int] = mapped_column(BigInteger, default=0)
+    upload_checkpoint: Mapped[str | None] = mapped_column(Text)
+    upload_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    external_id: Mapped[str | None] = mapped_column(String(255))
+    external_url: Mapped[str | None] = mapped_column(String(1000))
+    error: Mapped[str | None] = mapped_column(Text)
+    error_class: Mapped[str | None] = mapped_column(String(32))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class PublicationEvent(Base):
+    __tablename__ = "publication_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    publication_id: Mapped[int] = mapped_column(ForeignKey("publications.id", ondelete="CASCADE"), index=True)
+    from_status: Mapped[str | None] = mapped_column(String(32))
+    to_status: Mapped[str] = mapped_column(String(32))
+    actor: Mapped[str] = mapped_column(String(255))
+    error_class: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -129,12 +186,13 @@ class AuthSession(Base):
 class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (Index("uq_jobs_active_source", "source_id", unique=True,
-                           sqlite_where=text("status IN ('queued', 'running')"),
-                           postgresql_where=text("status IN ('queued', 'running')")),)
+                           sqlite_where=text("kind = 'process_source' AND status IN ('queued', 'running')"),
+                           postgresql_where=text("kind = 'process_source' AND status IN ('queued', 'running')")),)
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     kind: Mapped[str] = mapped_column(String(32), default="process_source")
     source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"))
-    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflow_runs.id"))
+    workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_runs.id"))
+    publication_id: Mapped[int | None] = mapped_column(ForeignKey("publications.id", ondelete="CASCADE"), unique=True)
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, default=3)
