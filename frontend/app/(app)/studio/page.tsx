@@ -11,7 +11,7 @@ import type { Clip, Source } from "../../lib/types";
 
 export default function StudioPage() {
   const sources = useResource<Source[]>("/api/v1/sources");
-  const clips = useResource<Clip[]>("/api/v1/clips");
+  const clips = useResource<Clip[]>("/api/v1/clips", 5000);
   const reload = async () => { await Promise.all([sources.reload(), clips.reload()]); };
   const action = useAction(reload);
   const [selected, setSelected] = useState<number | null>(null);
@@ -64,6 +64,7 @@ export default function StudioPage() {
     </section>
     {current && <section className="panel" aria-labelledby="rights-title">
       <h2 id="rights-title">3. Rights authorization</h2>
+      <p className="muted">Processing requires an unexpired, unrevoked record that allows commercial use and publishing.</p>
       <RightsForm key={current.id} sourceId={current.id} onApproved={() => { action.setMessage("Rights recorded."); reload(); }} />
       <div className="actions"><button type="button" onClick={process} disabled={processing || !current.has_media}>{processing ? "Processing…" : "Start AI processing"}</button>
         {!current.has_media && <span className="muted">This source has no media attached yet.</span>}</div>

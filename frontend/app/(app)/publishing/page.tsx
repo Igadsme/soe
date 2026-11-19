@@ -85,13 +85,13 @@ export default function PublishingPage() {
           {platform === "tiktok" && <label>TikTok privacy <select name="tiktok_privacy_level"><option value="SELF_ONLY">Only me</option></select></label>}
           {platform === "instagram" && <label className="check"><input type="checkbox" name="instagram_ack" /> I understand Instagram Reels use the account’s own visibility.</label>}
           <label>Publish at (optional) <input type="datetime-local" name="scheduled_at" /></label>
-          {errors.length > 0 && <ul className="alert error" role="alert">{errors.map((item) => <li key={item}>{item}</li>)}</ul>}
+          {errors.length > 0 && <div className="alert error" role="alert"><ul>{errors.map((item) => <li key={item}>{item}</li>)}</ul></div>}
           <button type="submit" disabled={action.busy}>Queue publication</button>
         </form>}</DataState>
     </section>
     <section className="panel" aria-labelledby="queue-title">
       <h2 id="queue-title">Publication queue</h2>
-      <DataState resource={queue} empty="Nothing queued.">{(rows) => <div className="table-wrap"><table>
+      <DataState resource={queue} empty="Nothing queued.">{(rows) => <div className="table-wrap" tabIndex={0} role="region" aria-label="Scrollable table"><table>
         <thead><tr><th scope="col">ID</th><th scope="col">Clip</th><th scope="col">Platform</th><th scope="col">Status</th><th scope="col">When</th><th scope="col">Progress</th><th scope="col">Actions</th></tr></thead>
         <tbody>{rows.map((row) => <tr key={row.id}>
           <td>{row.id}{row.dry_run ? " (dry run)" : ""}</td><td>#{row.clip_id} {row.title ?? ""}</td><td>{PLATFORM_LABEL[row.platform]}</td>

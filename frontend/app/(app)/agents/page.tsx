@@ -31,7 +31,7 @@ export default function AgentsPage() {
         <label>Status <select value={status} onChange={(e) => setStatus(e.target.value)}>{STATUSES.map((value) => <option key={value} value={value}>{value ? value.replaceAll("_", " ") : "any"}</option>)}</select></label>
         <label>Kind <select value={kind} onChange={(e) => setKind(e.target.value)}>{KINDS.map((value) => <option key={value} value={value}>{value ? value.replaceAll("_", " ") : "any"}</option>)}</select></label>
       </div>
-      <DataState resource={jobs} empty="No jobs match these filters.">{(rows) => <div className="table-wrap"><table>
+      <DataState resource={jobs} empty="No jobs match these filters.">{(rows) => <div className="table-wrap" tabIndex={0} role="region" aria-label="Scrollable table"><table>
         <thead><tr><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Created</th><th scope="col">Detail</th><th scope="col">Actions</th></tr></thead>
         <tbody>{rows.map((job) => <tr key={job.id}>
           <td>{job.kind}{job.source_id ? ` · source ${job.source_id}` : ""}</td><td><Badge value={job.status} /></td><td>{job.attempts}/{job.max_attempts}</td>

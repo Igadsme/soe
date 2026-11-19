@@ -37,7 +37,7 @@ export function useAction(onDone?: () => void | Promise<void>) {
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
   async function run(action: () => Promise<unknown>, success: string) {
-    setBusy(true);
+    setBusy(true); setError(false); setMessage("");
     try { await action(); setError(false); setMessage(success); await onDone?.(); }
     catch (err) { setError(true); setMessage(err instanceof Error ? err.message : "Action failed"); }
     finally { setBusy(false); }

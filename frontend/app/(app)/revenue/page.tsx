@@ -20,7 +20,7 @@ export default function RevenuePage() {
           <div className="card"><p className="muted">Verified expenses</p><strong>{cents(sum("expense"))}</strong></div>
         </div>
         <section className="panel" aria-labelledby="ledger-title"><h2 id="ledger-title">Ledger</h2>
-          <div className="table-wrap"><table><thead><tr><th scope="col">Kind</th><th scope="col">Category</th><th scope="col">Amount</th><th scope="col">Provenance</th><th scope="col">Note</th></tr></thead>
+          <div className="table-wrap" tabIndex={0} role="region" aria-label="Scrollable table"><table><thead><tr><th scope="col">Kind</th><th scope="col">Category</th><th scope="col">Amount</th><th scope="col">Provenance</th><th scope="col">Note</th></tr></thead>
             <tbody>{data.entries.map((entry) => <tr key={entry.id}><td>{entry.kind}</td><td>{entry.category}</td><td>{cents(entry.cents)}</td>
               <td><Badge value={entry.provenance ?? (entry.verified ? "verified" : "unverified")} /></td><td>{entry.note ?? "—"}</td></tr>)}</tbody></table></div>
         </section>

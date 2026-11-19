@@ -34,8 +34,8 @@ export function ClipCard({ clip, onChange, run, editable }: {
       {qcReasons.length ? <p className="alert error">Quality check failed: {qcReasons.join("; ")}</p> : null}
       <div className="actions">
         {clip.output_path && <a href={`${api}/api/v1/clips/${clip.id}/download`}>Download MP4</a>}
-        {editable && clip.status !== "approved" && <button type="button" onClick={() => run(() => request(`/api/v1/clips/${clip.id}/approve`, "POST"), `Clip ${clip.id} approved.`)}>Approve</button>}
-        {editable && clip.status !== "rejected" && <button type="button" onClick={() => run(() => request(`/api/v1/clips/${clip.id}/reject`, "POST"), `Clip ${clip.id} rejected.`)}>Reject</button>}
+        {editable && clip.status === "pending_review" && <button type="button" onClick={() => run(() => request(`/api/v1/clips/${clip.id}/approve`, "POST"), `Clip ${clip.id} approved.`)}>Approve</button>}
+        {editable && ["pending_review", "approved", "qc_failed"].includes(clip.status) && <button type="button" onClick={() => run(() => request(`/api/v1/clips/${clip.id}/reject`, "POST"), `Clip ${clip.id} rejected.`)}>Reject</button>}
         {editable && <button type="button" aria-expanded={editing} onClick={() => setEditing(!editing)}>Adjust timing</button>}
         <ConfirmButton label="Delete" danger confirm={`Delete clip ${clip.id}?`} onConfirm={() => run(() => request(`/api/v1/clips/${clip.id}`, "DELETE"), `Clip ${clip.id} deleted.`)} />
       </div>

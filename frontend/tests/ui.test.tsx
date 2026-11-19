@@ -1,3 +1,5 @@
+import { vi as viMock } from "vitest";
+viMock.mock("next/navigation", () => ({ usePathname: () => "/agents" }));
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { Badge, ConfirmButton, DataState } from "../app/components/ui";
@@ -81,5 +83,27 @@ describe("request", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({ detail: "authentication required" }) }));
     await expect(request("/api/v1/clips")).rejects.toThrow("authentication required");
     expect(assign).toHaveBeenCalledWith("/login?expired=1");
+  });
+});
+
+describe("Shell session gate", () => {
+  it("keeps the operator signed in when the API is rate limited", async () => {
+    const { Shell } = await import("../app/components/Shell");
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, pathname: "/agents", assign });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 429, json: async () => ({ detail: "rate limit exceeded" }) }));
+    render(<Shell><p>secret page</p></Shell>);
+    expect(await screen.findByText(/Too many requests/)).toBeTruthy();
+    expect(assign).not.toHaveBeenCalled();
+    expect(screen.queryByText("secret page")).toBeNull();
+  });
+  it("redirects to login on 401 without rendering children", async () => {
+    const { Shell } = await import("../app/components/Shell");
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, pathname: "/agents", assign });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({ detail: "authentication required" }) }));
+    render(<Shell><p>secret page</p></Shell>);
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/login?next=%2Fagents"));
+    expect(screen.queryByText("secret page")).toBeNull();
   });
 });

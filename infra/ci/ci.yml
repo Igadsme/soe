@@ -1,57 +1,95 @@
-# Proposed workflow. Owner must copy to .github/workflows with workflow permission.
-name: Production checks
-on: [push, pull_request]
+# Proposed workflow: identical to .github/workflows/ci.yml plus the e2e job.
+# The automation token lacks the 'workflow' scope, so the owner must copy this file to .github/workflows/ci.yml.
+name: Soe CI
+on:
+  push:
+  pull_request:
 permissions:
   contents: read
 jobs:
-  checks:
+  backend:
     runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16-alpine
         env:
+          POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test
+          POSTGRES_DB: soe_test
         ports: ["5432:5432"]
-        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+        options: --health-cmd "pg_isready -U postgres -d soe_test" --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
         ports: ["6379:6379"]
         options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       SOE_ENV: test
-      SOE_DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
-      SOE_TEST_POSTGRES_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
+      SOE_DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/soe_test
+      SOE_TEST_POSTGRES_URL: postgresql+psycopg://postgres:test@localhost:5432/soe_test
       SOE_TEST_REDIS_URL: redis://localhost:6379/1
       PYTHONPATH: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          python-version: "3.12"
       - run: pip install -r backend/requirements.txt
       - run: pip install -e ".[dev]"
       - run: alembic upgrade head
+      - run: alembic check
       - run: ruff check backend/app
-      - run: PYTHONPATH=backend pytest -q backend/tests tests --cov=backend/app --cov-fail-under=85 --cov-report=xml --cov-report=term-missing
+      - run: pytest -q backend/tests tests --cov=backend/app --cov-fail-under=85 --cov-report=xml --cov-report=term-missing
       - run: pip-audit -r backend/requirements.txt
-      - run: npm ci
-        working-directory: frontend
-      - run: npm audit --omit=dev
-        working-directory: frontend
-      - run: npm run typecheck
-        working-directory: frontend
-      - run: npm run build
-        working-directory: frontend
-      - run: SOE_DATABASE_URL=sqlite:////tmp/soe-ci-migrations.db alembic upgrade head
-        env:
-          PYTHONPATH: backend
-      - run: cp .env.example .env && docker compose -f docker-compose.prod.yml config --quiet && docker compose -f docker-compose.prod.yml build
-      - uses: actions/upload-artifact@v4
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          name: coverage
-          path: coverage.xml
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - run: npm audit --omit=dev --prefix frontend
+      - run: npm run typecheck --prefix frontend
+      - run: npm test --prefix frontend
+      - run: npm run build --prefix frontend
+  containers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - run: cp .env.example .env
+      - run: docker compose -f docker-compose.prod.yml config --quiet
+      - run: docker compose -f docker-compose.prod.yml build
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg espeak-ng
+      - run: pip install -r backend/requirements.txt
+      - run: npm ci --prefix frontend
+      - run: npx --prefix frontend playwright install --with-deps chromium
+      - run: bash scripts/generate_test_media.sh /tmp/soe-media
+      - run: npm run build --prefix frontend
+      - run: npx playwright test
+        working-directory: frontend
+        env:
+          SOE_E2E_MEDIA: /tmp/soe-media/talk_1080p_h264.mp4
+          SOE_E2E_WHISPER_CACHE: /tmp/whisper-cache
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results

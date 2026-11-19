@@ -20,7 +20,7 @@ export default function AnalyticsPage() {
             <div className="chart" role="img" aria-label={`Bar chart of verified totals: ${totals.map((t) => `${t.metric} ${t.value}`).join(", ")}`}>
               <ResponsiveContainer width="100%" height={260}><BarChart data={totals}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="metric" /><YAxis /><Tooltip /><Bar dataKey="value" fill="#7c5cff" /></BarChart></ResponsiveContainer>
             </div>
-            <div className="table-wrap"><table><thead><tr><th scope="col">Metric</th><th scope="col">Total</th></tr></thead>
+            <div className="table-wrap" tabIndex={0} role="region" aria-label="Scrollable table"><table><thead><tr><th scope="col">Metric</th><th scope="col">Total</th></tr></thead>
               <tbody>{totals.map((row) => <tr key={row.metric}><td>{row.metric}</td><td>{row.value.toLocaleString()}</td></tr>)}</tbody></table></div>
           </> : <p className="empty-state">No verified metrics yet.</p>}
         </section>

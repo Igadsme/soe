@@ -46,7 +46,7 @@ export default function DiscoveryPage() {
     <section className="panel" aria-labelledby="candidates-title">
       <h2 id="candidates-title">Discovered candidates</h2>
       <DataState resource={sources} empty="No discovered candidates yet." isEmpty={() => discovered.length === 0}>{() =>
-        <div className="table-wrap"><table><thead><tr><th scope="col">Title</th><th scope="col">Platform</th><th scope="col">Status</th><th scope="col">Found</th></tr></thead>
+        <div className="table-wrap" tabIndex={0} role="region" aria-label="Scrollable table"><table><thead><tr><th scope="col">Title</th><th scope="col">Platform</th><th scope="col">Status</th><th scope="col">Found</th></tr></thead>
           <tbody>{discovered.map((source) => <tr key={source.id}>
             <td><a href={source.url} target="_blank" rel="noreferrer noopener">{source.title}</a></td><td>{PLATFORM_LABEL[source.platform] ?? source.platform}</td>
             <td><Badge value={source.status} /></td><td>{formatDate(source.created_at)}</td></tr>)}</tbody></table></div>}</DataState>

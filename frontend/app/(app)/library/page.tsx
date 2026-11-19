@@ -22,7 +22,7 @@ export default function LibraryPage() {
       <h2 id="sources-title">Sources</h2>
       <label>Filter by title <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
       <DataState resource={sources} empty="No sources yet. Upload one in AI studio." isEmpty={() => visibleSources.length === 0}>{() =>
-        <div className="table-wrap"><table><thead><tr><th scope="col">Title</th><th scope="col">Origin</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col">Actions</th></tr></thead>
+        <div className="table-wrap" tabIndex={0} role="region" aria-label="Scrollable table"><table><thead><tr><th scope="col">Title</th><th scope="col">Origin</th><th scope="col">Status</th><th scope="col">Added</th><th scope="col">Actions</th></tr></thead>
           <tbody>{visibleSources.map((source) => <tr key={source.id}>
             <td>{source.title}</td><td>{PLATFORM_LABEL[source.platform] ?? source.platform}</td><td><Badge value={source.status} /></td><td>{formatDate(source.created_at)}</td>
             <td><ConfirmButton label="Archive" confirm={`Archive “${source.title}”?`} onConfirm={() => action.run(() => request(`/api/v1/sources/${source.id}/archive`, "POST"), "Source archived.")} /></td>

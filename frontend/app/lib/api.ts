@@ -49,6 +49,7 @@ export async function request<T = unknown>(path: string, method = "GET", body?: 
   handleUnauthorized(response.status);
   if (response.status === 204) return undefined as T;
   const data = await response.json().catch(() => ({}));
+  if (response.status === 429) throw new ApiError("Too many requests. Wait a minute and try again.", 429);
   if (!response.ok) throw new ApiError(errorDetail(data?.detail, `Request failed (${response.status})`), response.status);
   return data as T;
 }
