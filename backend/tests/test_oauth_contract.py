@@ -141,7 +141,7 @@ def test_oauth_connect_and_revoke_contract(platform, oauth_config, isolated_data
         route = f"/api/v1/oauth/{platform}/callback"
         result = client.get(route, params={"state": state, "code": CODE}, follow_redirects=False)
         assert result.status_code == 303
-        assert result.headers["location"] == f"{ORIGIN}/?view=settings&oauth=success&platform={platform}"
+        assert result.headers["location"] == f"{ORIGIN}/publishing?oauth=success&platform={platform}"
         assert result.headers["referrer-policy"] == "no-referrer"
         account, = client.get("/api/v1/accounts").json()
         assert account["display_name"] == "Demo channel" and account["external_account_id"] == "123"

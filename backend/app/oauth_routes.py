@@ -31,7 +31,7 @@ def binding(request: Request) -> str:
 
 def redirect(platform: str, success: bool) -> RedirectResponse:
     origin = settings.oauth_origin() or ""
-    return RedirectResponse(f"{origin}/?view=settings&oauth={'success' if success else 'failure'}&platform={platform}",
+    return RedirectResponse(f"{origin}/publishing?oauth={'success' if success else 'failure'}&platform={platform}",
                             status_code=303, headers=PRIVATE_HEADERS)
 
 

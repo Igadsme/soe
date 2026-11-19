@@ -461,7 +461,14 @@ def agents(db: Session = Depends(session), _: str = Depends(require_auth)) -> li
 
 @app.get("/api/v1/settings")
 def read_settings(_: str = Depends(require_auth)) -> dict:
-    return {"environment": settings.env, "demo_mode": settings.demo_mode, "whisper_model_size": settings.whisper_model_size, "publishing_enabled": settings.publishing_enabled, "max_upload_bytes": settings.max_upload_bytes, "max_clip_seconds": settings.max_clip_seconds, "configured_integrations": {"youtube": bool(settings.youtube_api_key), "twitch": bool(settings.twitch_client_id and settings.twitch_client_secret)}}
+    platforms = ("youtube", "tiktok", "instagram")
+    return {"environment": settings.env, "demo_mode": settings.demo_mode, "whisper_model_size": settings.whisper_model_size,
+            "publishing_enabled": settings.publishing_enabled, "publishing_dry_run": settings.publishing_dry_run,
+            "max_upload_bytes": settings.max_upload_bytes, "max_clip_seconds": settings.max_clip_seconds,
+            "configured_integrations": {"youtube": bool(settings.youtube_api_key), "twitch": bool(settings.twitch_client_id and settings.twitch_client_secret)},
+            "publishing_platforms": {platform: {"enabled": settings.publishing_allowed(platform),
+                                                "oauth_configured": all(settings.oauth_credentials(platform)) and bool(settings.oauth_origin())}
+                                     for platform in platforms}}
 
 
 @app.post("/api/v1/demo/pipeline")

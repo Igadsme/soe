@@ -1,0 +1,17 @@
+export type Source = { id: number; platform: string; external_id: string; title: string; url: string; has_media: boolean; status: string; created_at: string };
+export type Clip = { id: number; source_id: number; status: string; start_seconds: number; end_seconds: number; description: string; hook: string; score: number;
+  evidence: Record<string, unknown>; output_path?: string | null; subtitle_path?: string | null; created_at?: string | null };
+export type Job = { id: string; kind: string; source_id?: number | null; publication_id?: number | null; replay_of_id?: string | null; status: string; attempts: number;
+  max_attempts: number; run_after?: string | null; deadline_at?: string | null; wait_reason?: string | null; error_class?: string | null; last_error?: string | null;
+  result?: Record<string, unknown> | null; created_at: string; updated_at?: string | null };
+export type Account = { id: number; platform: string; display_name: string; status: string; scopes: string[]; daily_upload_limit: number };
+export type Publication = { id: number; clip_id: number; account_id: number; platform: string; status: string; external_id?: string | null; external_url?: string | null;
+  title?: string | null; privacy_status?: string | null; scheduled_at?: string | null; attempts: number; upload_progress?: { bytes_sent: number; bytes_total: number } | null;
+  error_class?: string | null; last_error?: string | null; dry_run?: boolean };
+export type PlatformFlags = { enabled: boolean; oauth_configured: boolean };
+export type AppSettings = { environment: string; demo_mode: boolean; whisper_model_size: string; publishing_enabled: boolean; publishing_dry_run?: boolean;
+  max_upload_bytes: number; max_clip_seconds: number; configured_integrations: Record<string, boolean>; publishing_platforms?: Record<string, PlatformFlags> };
+export type SystemStatus = { emergency_stopped: boolean; queue_depth: Record<string, Record<string, number>>; worker_heartbeat_age_seconds: number | null; budget?: Record<string, unknown> };
+export type AuditEvent = { id: number; actor: string; action: string; entity: string; entity_id: string; details: Record<string, unknown> | null; created_at: string };
+export const PUBLISH_PLATFORMS = ["youtube", "tiktok", "instagram"] as const;
+export const PLATFORM_LABEL: Record<string, string> = { youtube: "YouTube", tiktok: "TikTok", instagram: "Instagram", twitch: "Twitch", upload: "Upload" };
